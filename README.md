@@ -1,0 +1,173 @@
+# QP-X-XRM Backend
+
+Account, authentication, and entitlement service for Quicker Portal.
+
+**Zero third-party runtime dependencies.** Everything is built on Node.js
+built-ins (`node:http`, `node:crypto`, `node:fs`, `node:net`, `node:tls`).
+`package.json` has an empty `dependencies` and `devDependencies` — tests run on
+the built-in `node:test` runner.
+
+## Quick start
+
+```bash
+npm start
+```
+
+The service listens on `http://127.0.0.1:4817` by default and creates its data
+directory on first boot.
+
+Run the tests:
+
+```bash
+npm test
+```
+
+## Architecture
+
+```
+server.js                     entry point, signal handling
+src/
+  config/config.js            all configuration, env-var overridable
+  core/
+    errors.js                 error taxonomy -> HTTP status mapping
+    logger.js                 JSON-lines logging with secret redaction
+    http/router.js            method + path routing
+    http/context.js           body parsing with size limits, JSON responses
+    middleware/
+      security.js             security headers, strict CORS allow-list
+      rate-limit.js           sliding-window limiter
+      authenticate.js         bearer verification + session liveness check
+  lib/
+    crypto.js                 scrypt hashing, HMAC, constant-time compare
+    key-store.js              signing key generation, persistence, rotation
+    tokens.js                 signed access tokens (HS256, algorithm pinned)
+    json-store.js             atomic crash-safe JSON persistence
+    validation.js             input normalization and policy
+  modules/
+    auth/auth-service.js      signup, verify, login, refresh, logout, password
+    auth/session-store.js     refresh rotation + reuse detection
+    users/user-repo.js        user records and unique indexes
+    plans/plan-catalog.js     plan -> feature mapping (single source of truth)
+    plans/subscription-store.js  subscriptions, entitlement derivation
+    mail/mailer.js            outbox and SMTP transports
+    mail/smtp-client.js       minimal SMTP client (STARTTLS, AUTH LOGIN)
+    audit/audit.js            append-only security event log
+  routes.js                   HTTP surface
+```
+
+### Data layout
+
+All state lives under `data/` (owner-only `0700` directories, `0600` files):
+
+```
+data/
+  users/users.json            user records + email/username indexes
+  users/pending-signups.json  unverified signups (no user row exists yet)
+  plans/subscriptions.json    subscription + plan state, kept separate from identity
+  sessions/sessions.json      refresh sessions (hashes only, never raw tokens)
+  keys/signing-keys.json      HMAC signing keys
+  audit/security-events.jsonl append-only audit trail
+  outbox/*.eml                sent mail when using the outbox transport
+```
+
+Writes are atomic: temp file, `fsync`, then `rename`. A per-file promise chain
+serializes read-modify-write cycles so concurrent requests cannot interleave.
+
+## Security properties
+
+**Passwords.** scrypt (N=32768, r=8, p=1) with a per-user random salt.
+Parameters are stored inside the hash string, so costs can be raised later and
+existing users are transparently rehashed on their next successful login.
+Passwords are length-capped to prevent scrypt-based denial of service.
+
+**Tokens.** Access tokens are JWT-compatible but the algorithm is pinned to
+HS256 server-side — `alg: none` and key-confusion attacks are structurally
+impossible. Claims carry the plan and entitlement list, so a modified token
+fails signature verification. Keys carry a `kid` for rotation.
+
+**Sessions.** Refresh tokens are 256-bit random values; only their SHA-256 is
+persisted. Every refresh rotates the token. Presenting an already-rotated token
+means it leaked, so the whole session family is revoked immediately. Sessions
+have both a sliding expiry and an absolute cap.
+
+**Account enumeration.** Login returns one identical error for unknown users and
+wrong passwords, and performs a real scrypt verification against a dummy hash
+when the identifier does not exist, so response timing does not leak existence.
+
+**Signup.** Two-phase. `/signup/start` stores a pending registration with an
+HMAC'd verification code — no user row exists until the code is proven. Codes
+expire, are attempt-limited, and are resend-throttled.
+
+**Lockout and rate limiting.** Per-IP and per-account budgets on login, plus
+exponential account lockout after repeated failures.
+
+**Entitlements.** Derived from the subscription store, never from client input.
+`/api/auth/me` recomputes them from storage rather than trusting token claims.
+
+**Auditing.** Every security-relevant event is appended to
+`data/audit/security-events.jsonl`. Secrets are redacted from logs by field name.
+
+## API
+
+| Method | Endpoint | Auth | Purpose |
+|---|---|---|---|
+| GET | `/api/health` | — | Liveness probe |
+| GET | `/api/plans` | — | Plan catalog |
+| POST | `/api/auth/signup/start` | — | Begin signup, email a code |
+| POST | `/api/auth/signup/resend` | — | Resend the code (throttled) |
+| POST | `/api/auth/signup/verify` | — | Prove the code, create the account |
+| POST | `/api/auth/login` | — | Sign in with username **or** email |
+| POST | `/api/auth/refresh` | — | Rotate refresh token, mint access token |
+| POST | `/api/auth/logout` | — | Revoke one session |
+| POST | `/api/auth/logout-all` | Bearer | Revoke every session |
+| GET | `/api/auth/me` | Bearer | Identity + authoritative entitlements |
+| POST | `/api/auth/password` | Bearer | Change password, revokes all sessions |
+| POST | `/api/account/plan` | Bearer | Change plan (payment is out of scope) |
+
+## Configuration
+
+Every value has a safe default; override with environment variables.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `QP_BACKEND_HOST` | `127.0.0.1` | Bind address |
+| `QP_BACKEND_PORT` | `4817` | Port |
+| `QP_BACKEND_DATA_DIR` | `./data` | State directory |
+| `QP_BACKEND_ALLOWED_ORIGINS` | localhost:5817 | CORS allow-list |
+| `QP_BACKEND_TRUST_PROXY` | unset | Set to `1` only behind a trusted proxy |
+| `QP_ACCESS_TOKEN_TTL_SECONDS` | `900` | Access token lifetime |
+| `QP_REFRESH_TOKEN_TTL_SECONDS` | `2592000` | Refresh token lifetime |
+| `QP_MAIL_TRANSPORT` | `outbox` | `outbox` or `smtp` |
+| `QP_MAIL_FROM` | no-reply@… | Sender address |
+| `QP_SMTP_HOST` / `_PORT` / `_USER` / `_PASS` / `_SECURE` | — | SMTP settings |
+| `QP_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
+
+### Local development mail
+
+The default `outbox` transport writes each message as a `.eml` file under
+`data/outbox/`. To read a verification code during development:
+
+```bash
+grep -h "code is" data/outbox/*.eml | tail -1
+```
+
+## Production notes
+
+Deliberate scope boundaries, and what to do before going live:
+
+- **Payments are not implemented.** `/api/account/plan` changes the plan
+  directly. Wire it to a payment provider's webhook or receipt verification
+  before charging money.
+- **Terminate TLS in front of this service.** It binds to loopback and speaks
+  plain HTTP; run it behind a reverse proxy that handles certificates. Only set
+  `QP_BACKEND_TRUST_PROXY=1` when a trusted proxy actually sets
+  `X-Forwarded-For`, otherwise clients can spoof their rate-limit identity.
+- **Rate-limit counters are per-process.** Running multiple instances needs a
+  shared store; the interface in `rate-limit.js` is the seam.
+- **Back up `data/keys/signing-keys.json`.** Losing it invalidates every issued
+  token (users simply sign in again). Leaking it lets an attacker mint valid
+  tokens — treat it as a secret and rotate by adding a new key and switching
+  `activeKid`.
+- **The JSON stores suit single-node deployments.** The repository interfaces
+  (`user-repo.js`, `session-store.js`, `subscription-store.js`) are the seam to
+  swap in a database without touching business logic.

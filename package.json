@@ -1,0 +1,19 @@
+{
+  "name": "qp-x-xrm-backend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Quicker Portal account, authentication, and entitlement service. Zero third-party runtime dependencies — Node.js built-ins only.",
+  "type": "module",
+  "main": "server.js",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "node --test \"test/*.test.js\"",
+    "check": "node --check server.js && node ./scripts/check-syntax.mjs"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}
