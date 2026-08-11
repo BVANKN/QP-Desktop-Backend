@@ -7,7 +7,8 @@ export const FEATURES = Object.freeze({
   POWER_AUTOMATE: 'dataverse.flows',
   DATAVERSE_ADVANCED: 'dataverse.advanced', // connection refs, model apps, solutions, env vars, security, workbench
   REPORTS: 'reports.insights',
-  DEVELOPER_APPS: 'developer.apps'
+  DEVELOPER_APPS: 'developer.apps',
+  MCP_SERVER: 'mcp.server'
 });
 
 export const PLANS = Object.freeze({
@@ -33,7 +34,8 @@ export const PLANS = Object.freeze({
       FEATURES.POWER_AUTOMATE,
       FEATURES.DATAVERSE_ADVANCED,
       FEATURES.REPORTS,
-      FEATURES.DEVELOPER_APPS
+      FEATURES.DEVELOPER_APPS,
+      FEATURES.MCP_SERVER
     ])
   })
 });

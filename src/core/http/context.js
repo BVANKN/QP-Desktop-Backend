@@ -31,20 +31,20 @@ function resolveClientIp(req) {
   return req.socket.remoteAddress || 'unknown';
 }
 
-export async function readJsonBody(ctx) {
+export async function readJsonBody(ctx, maxBytes = config.maxBodyBytes) {
   const { req } = ctx;
   const contentType = String(req.headers['content-type'] || '');
   if (!contentType.toLowerCase().startsWith('application/json')) {
     throw new ValidationError('Content-Type must be application/json.');
   }
   const declaredLength = Number.parseInt(req.headers['content-length'] || '0', 10);
-  if (declaredLength > config.maxBodyBytes) throw new PayloadTooLargeError();
+  if (declaredLength > maxBytes) throw new PayloadTooLargeError();
 
   const chunks = [];
   let received = 0;
   for await (const chunk of req) {
     received += chunk.length;
-    if (received > config.maxBodyBytes) throw new PayloadTooLargeError();
+    if (received > maxBytes) throw new PayloadTooLargeError();
     chunks.push(chunk);
   }
   if (!received) return {};

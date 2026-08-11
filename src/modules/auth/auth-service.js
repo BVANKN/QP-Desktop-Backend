@@ -54,6 +54,26 @@ function dummyHash() {
   return dummyHashPromise;
 }
 
+
+// STATIC CODE — temporary, development only.
+//
+// Gmail/SMTP delivery is switched off, so signup hands out a fixed code
+// instead of emailing a random one. Everything around it is unchanged: the
+// code is still HMAC'd into the pending record, still expires, and is still
+// attempt-limited, so only the delivery step is short-circuited.
+//
+// To restore real email: set config.verification.staticCode to '' (or export
+// QP_VERIFICATION_STATIC_CODE=''). The random code and the sendMail calls come
+// back on their own — nothing here needs editing.
+function issueVerificationCode() {
+  const fixed = config.verification.staticCode;
+  return fixed ? String(fixed) : randomNumericCode(config.verification.codeLength);
+}
+
+function verificationDeliveryDisabled() {
+  return Boolean(config.verification.staticCode);
+}
+
 function codeDigest(pendingId, code) {
   // HMAC with the server signing key: the pending file alone is not enough
   // to recover or forge a 6-digit code offline.
@@ -98,7 +118,7 @@ export async function startSignup({ name, username, email, password, planId, ip 
 
   const passwordHash = await hashPassword(password);
   const pendingId = randomId('pnd');
-  const code = randomNumericCode(config.verification.codeLength);
+  const code = issueVerificationCode();
 
   await pendingStore.update(db => {
     // One live pending signup per email — restarting signup invalidates
@@ -122,8 +142,13 @@ export async function startSignup({ name, username, email, password, planId, ip 
     };
   });
 
-  await sendMail({ to: email, ...verificationEmail({ name, code, ttlMinutes: Math.round(config.verification.ttlSeconds / 60) }) });
-  await audit('signup.started', { pendingId, email, username, ip });
+  // STATIC CODE: email delivery is commented out. Uncomment this line — or
+  // just clear config.verification.staticCode, which makes the guard fall
+  // through to it — to send the real message again.
+  if (!verificationDeliveryDisabled()) {
+    await sendMail({ to: email, ...verificationEmail({ name, code, ttlMinutes: Math.round(config.verification.ttlSeconds / 60) }) });
+  }
+  await audit('signup.started', { pendingId, email, username, ip, staticCode: verificationDeliveryDisabled() });
 
   return {
     pendingId,
@@ -134,7 +159,7 @@ export async function startSignup({ name, username, email, password, planId, ip 
 }
 
 export async function resendSignupCode({ pendingId, ip }) {
-  const code = randomNumericCode(config.verification.codeLength);
+  const code = issueVerificationCode();
   const entry = await pendingStore.update(db => {
     const pending = db.pending[pendingId];
     if (!pending || pending.expiresAt <= nowSeconds()) return { result: null };
@@ -152,11 +177,16 @@ export async function resendSignupCode({ pendingId, ip }) {
   if (entry.blocked === 'max_resends') throw new RateLimitError('Too many codes requested. Start the signup again later.', 3600);
   if (entry.blocked === 'cooldown') throw new RateLimitError('Please wait before requesting another code.', config.verification.resendCooldownSeconds);
 
-  await sendMail({
-    to: entry.pending.email,
-    ...verificationEmail({ name: entry.pending.name, code, ttlMinutes: Math.round(config.verification.ttlSeconds / 60) })
-  });
-  await audit('signup.code_resent', { pendingId, ip });
+  // STATIC CODE: see issueVerificationCode above. Resending still rotates the
+  // stored hash and resets the attempt counter, so the throttling behaviour is
+  // exactly what it will be once delivery is switched back on.
+  if (!verificationDeliveryDisabled()) {
+    await sendMail({
+      to: entry.pending.email,
+      ...verificationEmail({ name: entry.pending.name, code, ttlMinutes: Math.round(config.verification.ttlSeconds / 60) })
+    });
+  }
+  await audit('signup.code_resent', { pendingId, ip, staticCode: verificationDeliveryDisabled() });
   return { pendingId, resendCooldownSeconds: config.verification.resendCooldownSeconds };
 }
 

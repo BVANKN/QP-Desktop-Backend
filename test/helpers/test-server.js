@@ -20,8 +20,8 @@ export async function startTestServer() {
   const { port } = server.address();
   const baseUrl = `http://127.0.0.1:${port}`;
 
-  async function call(method, endpoint, body, { accessToken } = {}) {
-    const headers = { 'Content-Type': 'application/json' };
+  async function call(method, endpoint, body, { accessToken, headers: extraHeaders = {} } = {}) {
+    const headers = { 'Content-Type': 'application/json', ...extraHeaders };
     if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
     const response = await fetch(`${baseUrl}${endpoint}`, {
       method,
@@ -41,8 +41,16 @@ export async function startTestServer() {
   };
 }
 
-// Reads the newest verification code out of the outbox transport.
+// The verification code for the newest signup.
+//
+// While delivery is switched off (config.verification.staticCode), no message
+// is written, so the fixed code is the answer. Once the static code is cleared
+// and real email comes back, this falls through to reading the outbox exactly
+// as before — the tests do not need editing either way.
 export function readLatestCode(dataDir) {
+  const staticCode = process.env.QP_VERIFICATION_STATIC_CODE ?? '123456';
+  if (staticCode) return staticCode;
+
   const outbox = path.join(dataDir, 'outbox');
   const files = fs.readdirSync(outbox).sort();
   const latest = fs.readFileSync(path.join(outbox, files[files.length - 1]), 'utf8');

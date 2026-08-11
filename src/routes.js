@@ -30,9 +30,12 @@ import { changePlan, entitlementsForUser } from './modules/plans/subscription-st
 import { findUserById, publicUser, updateUser } from './modules/users/user-repo.js';
 import { issueAccessToken } from './lib/tokens.js';
 import { audit } from './modules/audit/audit.js';
+import { registerMcpRoutes } from './modules/mcp/routes.js';
 
 export function buildRouter() {
   const router = new Router();
+
+  registerMcpRoutes(router);
 
   router.get('/api/health', ctx => {
     sendJson(ctx, 200, { ok: true, service: 'qp-x-xrm-backend', time: new Date().toISOString() });

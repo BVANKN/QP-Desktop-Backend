@@ -52,6 +52,8 @@ src/
     mail/mailer.js            outbox and SMTP transports
     mail/smtp-client.js       minimal SMTP client (STARTTLS, AUTH LOGIN)
     audit/audit.js            append-only security event log
+    mcp/                      Streamable HTTP protocol, tool catalog, broker,
+                              connection keys, and transmission analytics
   routes.js                   HTTP surface
 ```
 
@@ -67,6 +69,9 @@ data/
   sessions/sessions.json      refresh sessions (hashes only, never raw tokens)
   keys/signing-keys.json      HMAC signing keys
   audit/security-events.jsonl append-only audit trail
+  mcp/connections.json        MCP connection metadata + bearer-key hashes
+  mcp/jobs.json               short-lived desktop execution queue
+  mcp/transmissions.jsonl     append-only redacted transmission history
   outbox/*.eml                sent mail when using the outbox transport
 ```
 
@@ -123,6 +128,27 @@ exponential account lockout after repeated failures.
 | GET | `/api/auth/me` | Bearer | Identity + authoritative entitlements |
 | POST | `/api/auth/password` | Bearer | Change password, revokes all sessions |
 | POST | `/api/account/plan` | Bearer | Change plan (payment is out of scope) |
+| GET | `/api/mcp/tools` | QP Bearer + Pro | Governed Power Platform tool catalog |
+| GET/POST | `/api/mcp/connections` | QP Bearer + Pro | List/create tenant-scoped MCP connections |
+| DELETE | `/api/mcp/connections/:id` | QP Bearer + Pro | Revoke a connection key |
+| GET | `/api/mcp/analytics` | QP Bearer + Pro | Stream-aggregate MCP transmission analytics |
+| POST | `/mcp/:userId/:tenantId` | MCP Bearer | Stateless Streamable HTTP JSON-RPC endpoint |
+| POST | `/mcp/:userId/:tenantId/:toolName` | MCP Bearer | Optional one-tool-scoped endpoint |
+
+## MCP architecture
+
+The backend is a broker, not a Dataverse credential store:
+
+1. A Pro user creates an MCP connection in the Quicker Portal desktop.
+2. The backend returns the endpoint and a one-time `qpmcp.*` bearer key. Only a SHA-256 hash is persisted.
+3. An MCP client calls `initialize`, `tools/list`, or `tools/call` on the Streamable HTTP endpoint.
+4. A tool call becomes a user/tenant/environment-scoped job. The connected desktop leases only jobs for its selected environment.
+5. Reads execute with the desktop's existing delegated Microsoft token. Writes and destructive operations require a native one-time desktop approval.
+6. The desktop returns the result; the backend records byte counts, duration, risk, detected tables/columns/record IDs, and optionally redacted payload values.
+
+The server is stateless at the MCP protocol layer, so `GET` session streams and `DELETE` session termination return `405`; clients use JSON responses to `POST`. The standard endpoint exposes all tools, while the optional final path segment limits discovery and calls to one tool.
+
+The generated client configuration uses a static bearer key for clients that support custom headers. It is not an OAuth authorization-code implementation. Before offering the endpoint to hosted clients that mandate OAuth, add OAuth 2.1 authorization-code + PKCE, resource indicators, authorization-server metadata, and consent. Always terminate TLS at a trusted reverse proxy.
 
 ## Configuration
 
@@ -137,10 +163,36 @@ Every value has a safe default; override with environment variables.
 | `QP_BACKEND_TRUST_PROXY` | unset | Set to `1` only behind a trusted proxy |
 | `QP_ACCESS_TOKEN_TTL_SECONDS` | `900` | Access token lifetime |
 | `QP_REFRESH_TOKEN_TTL_SECONDS` | `2592000` | Refresh token lifetime |
+| `QP_VERIFICATION_STATIC_CODE` | `123456` | Fixed signup code; set to `''` to email a random one. **Must be empty in production.** |
 | `QP_MAIL_TRANSPORT` | `outbox` | `outbox` or `smtp` |
 | `QP_MAIL_FROM` | no-reply@… | Sender address |
 | `QP_SMTP_HOST` / `_PORT` / `_USER` / `_PASS` / `_SECURE` | — | SMTP settings |
 | `QP_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
+| `QP_MCP_PUBLIC_BASE_URL` | request origin | Public HTTPS base used in generated MCP endpoints |
+| `QP_MCP_MAX_PAYLOAD_BYTES` | `10485760` | Maximum desktop result/request payload |
+| `QP_MCP_DESKTOP_TIMEOUT_MS` | `55000` | Maximum wait for desktop execution |
+
+### Verification codes are currently static
+
+**Email delivery of the signup code is switched off.** Signup and resend hand
+out a fixed code — `123456` — instead of mailing a random one. Everything
+around delivery is unchanged: the code is still HMAC'd into the pending record,
+still expires, is still attempt-limited, and resends still rotate it and reset
+the counter, so the throttling behaviour is already what it will be once real
+mail comes back.
+
+To restore Gmail/SMTP delivery, clear the static code — nothing else needs
+editing, and the random code and `sendMail` calls come back on their own:
+
+```bash
+QP_VERIFICATION_STATIC_CODE='' npm start
+```
+
+Or set `staticCode: ''` in `src/config/config.js` to make it permanent. The
+tests read the same switch, so they pass either way.
+
+> **This must be empty in production.** A fixed code means anyone who knows it
+> can verify any address, which defeats email ownership entirely.
 
 ### Local development mail
 
@@ -171,3 +223,5 @@ Deliberate scope boundaries, and what to do before going live:
 - **The JSON stores suit single-node deployments.** The repository interfaces
   (`user-repo.js`, `session-store.js`, `subscription-store.js`) are the seam to
   swap in a database without touching business logic.
+- **The MCP broker is single-node.** Desktop heartbeats are in memory and jobs use the local JSON store. Multi-instance deployment needs a shared transactional queue, distributed leases, and a shared analytics store.
+- **Detailed MCP analytics retain business payloads.** Credential-like keys are redacted and oversized strings are truncated, but ordinary Dataverse field values are retained by design. Apply retention/deletion policy and encryption at rest, or require metadata-only capture.

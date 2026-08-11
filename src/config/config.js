@@ -40,6 +40,12 @@ export const config = Object.freeze({
   maxBodyBytes: intEnv('QP_BACKEND_MAX_BODY_BYTES', 64 * 1024),
   requestTimeoutMs: intEnv('QP_BACKEND_REQUEST_TIMEOUT_MS', 15_000),
 
+  mcp: Object.freeze({
+    publicBaseUrl: process.env.QP_MCP_PUBLIC_BASE_URL || '',
+    maxPayloadBytes: intEnv('QP_MCP_MAX_PAYLOAD_BYTES', 10 * 1024 * 1024),
+    desktopTimeoutMs: intEnv('QP_MCP_DESKTOP_TIMEOUT_MS', 55_000)
+  }),
+
   token: Object.freeze({
     issuer: 'qp-x-xrm-backend',
     audience: 'quicker-portal-desktop',
@@ -61,6 +67,16 @@ export const config = Object.freeze({
   }),
 
   verification: Object.freeze({
+    // TEMPORARY — development only.
+    //
+    // Gmail/SMTP delivery is switched off, so signup and resend hand out this
+    // fixed code instead of emailing a random one. To restore real delivery:
+    // set this to '' (or QP_VERIFICATION_STATIC_CODE='') and uncomment the two
+    // blocks marked "STATIC CODE" in src/modules/auth/auth-service.js.
+    //
+    // This MUST be empty in production: a fixed code means anyone who knows it
+    // can verify any address, which defeats email ownership entirely.
+    staticCode: process.env.QP_VERIFICATION_STATIC_CODE ?? '123456',
     codeLength: 6,
     ttlSeconds: intEnv('QP_VERIFICATION_TTL_SECONDS', 10 * 60),
     maxAttempts: 5,
