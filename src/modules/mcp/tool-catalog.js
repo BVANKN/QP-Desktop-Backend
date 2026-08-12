@@ -138,12 +138,18 @@ export const MCP_TOOLS = Object.freeze([
 export const MCP_TOOL_BY_NAME = new Map(MCP_TOOLS.map(item => [item.name, item]));
 
 export function publicTool(toolDefinition) {
+  const securitySchemes = [{
+    type: 'oauth2',
+    scopes: [toolDefinition.annotations.readOnlyHint ? 'mcp:read' : 'mcp:write']
+  }];
   return {
     name: toolDefinition.name,
     description: toolDefinition.description,
     inputSchema: toolDefinition.inputSchema,
     annotations: toolDefinition.annotations,
+    securitySchemes,
     _meta: {
+      securitySchemes,
       'quickerportal/action': toolDefinition.action,
       'quickerportal/risk': toolDefinition.risk,
       'quickerportal/execution': 'connected-desktop'

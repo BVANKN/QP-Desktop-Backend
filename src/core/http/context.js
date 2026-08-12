@@ -55,6 +55,25 @@ export async function readJsonBody(ctx, maxBytes = config.maxBodyBytes) {
   }
 }
 
+export async function readFormBody(ctx, maxBytes = config.maxBodyBytes) {
+  const { req } = ctx;
+  const contentType = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+  if (contentType !== 'application/x-www-form-urlencoded') {
+    throw new ValidationError('Content-Type must be application/x-www-form-urlencoded.');
+  }
+  const declaredLength = Number.parseInt(req.headers['content-length'] || '0', 10);
+  if (declaredLength > maxBytes) throw new PayloadTooLargeError();
+
+  const chunks = [];
+  let received = 0;
+  for await (const chunk of req) {
+    received += chunk.length;
+    if (received > maxBytes) throw new PayloadTooLargeError();
+    chunks.push(chunk);
+  }
+  return new URLSearchParams(Buffer.concat(chunks).toString('utf8'));
+}
+
 export function sendJson(ctx, status, body, extraHeaders = {}) {
   if (ctx.res.writableEnded) return;
   const payload = JSON.stringify(body);
@@ -65,4 +84,27 @@ export function sendJson(ctx, status, body, extraHeaders = {}) {
     ...extraHeaders
   });
   ctx.res.end(payload);
+}
+
+export function sendHtml(ctx, status, html, extraHeaders = {}) {
+  if (ctx.res.writableEnded) return;
+  const payload = String(html || '');
+  ctx.res.writeHead(status, {
+    'Content-Type': 'text/html; charset=utf-8',
+    'Content-Length': Buffer.byteLength(payload),
+    'Cache-Control': 'no-store',
+    'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+    ...extraHeaders
+  });
+  ctx.res.end(payload);
+}
+
+export function sendRedirect(ctx, location, status = 302) {
+  if (ctx.res.writableEnded) return;
+  ctx.res.writeHead(status, {
+    Location: String(location),
+    'Cache-Control': 'no-store',
+    Pragma: 'no-cache'
+  });
+  ctx.res.end();
 }

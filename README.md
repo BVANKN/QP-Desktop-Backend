@@ -53,7 +53,7 @@ src/
     mail/smtp-client.js       minimal SMTP client (STARTTLS, AUTH LOGIN)
     audit/audit.js            append-only security event log
     mcp/                      Streamable HTTP protocol, tool catalog, broker,
-                              connection keys, and transmission analytics
+                              OAuth 2.1, connection keys, and transmission analytics
   routes.js                   HTTP surface
 ```
 
@@ -70,6 +70,9 @@ data/
   keys/signing-keys.json      HMAC signing keys
   audit/security-events.jsonl append-only audit trail
   mcp/connections.json        MCP connection metadata + bearer-key hashes
+  mcp/oauth-clients.json      dynamically registered public OAuth clients
+  mcp/oauth-authorizations.json short-lived authorization + CSRF records
+  mcp/oauth-tokens.json       authorization-code and rotating-token hashes
   mcp/jobs.json               short-lived desktop execution queue
   mcp/transmissions.jsonl     append-only redacted transmission history
   outbox/*.eml                sent mail when using the outbox transport
@@ -132,23 +135,30 @@ exponential account lockout after repeated failures.
 | GET/POST | `/api/mcp/connections` | QP Bearer + Pro | List/create tenant-scoped MCP connections |
 | DELETE | `/api/mcp/connections/:id` | QP Bearer + Pro | Revoke a connection key |
 | GET | `/api/mcp/analytics` | QP Bearer + Pro | Stream-aggregate MCP transmission analytics |
-| POST | `/mcp/:userId/:tenantId` | MCP Bearer | Stateless Streamable HTTP JSON-RPC endpoint |
-| POST | `/mcp/:userId/:tenantId/:toolName` | MCP Bearer | Optional one-tool-scoped endpoint |
+| GET | `/.well-known/oauth-protected-resource/mcp/:userId/:tenantId` | — | RFC 9728 protected-resource discovery |
+| GET | `/.well-known/oauth-authorization-server` | — | RFC 8414 authorization-server discovery |
+| POST | `/oauth/register` | — | RFC 7591 dynamic registration for public PKCE clients |
+| GET/POST | `/oauth/authorize` | — | User sign-in, consent, and authorization-code issuance |
+| POST | `/oauth/token` | — | Authorization-code exchange and refresh-token rotation |
+| POST | `/oauth/revoke` | — | Revoke an OAuth grant |
+| POST | `/mcp/:userId/:tenantId` | OAuth or MCP Bearer | Stateless Streamable HTTP JSON-RPC endpoint |
+| POST | `/mcp/:userId/:tenantId/:toolName` | OAuth or MCP Bearer | Optional one-tool-scoped endpoint |
 
 ## MCP architecture
 
 The backend is a broker, not a Dataverse credential store:
 
 1. A Pro user creates an MCP connection in the Quicker Portal desktop.
-2. The backend returns the endpoint and a one-time `qpmcp.*` bearer key. Only a SHA-256 hash is persisted.
-3. An MCP client calls `initialize`, `tools/list`, or `tools/call` on the Streamable HTTP endpoint.
-4. A tool call becomes a user/tenant/environment-scoped job. The connected desktop leases only jobs for its selected environment.
-5. Reads execute with the desktop's existing delegated Microsoft token. Writes and destructive operations require a native one-time desktop approval.
-6. The desktop returns the result; the backend records byte counts, duration, risk, detected tables/columns/record IDs, and optionally redacted payload values.
+2. The backend returns a connection-specific HTTPS endpoint. ChatGPT discovers protected-resource and authorization-server metadata, dynamically registers as a public client, and starts authorization code + S256 PKCE.
+3. The user signs in to their Quicker Portal account and consents to the exact tenant/environment connection. Access and refresh tokens are opaque, resource-bound, stored only as SHA-256 hashes, and refresh tokens rotate on every use with replay detection.
+4. The MCP client calls `initialize`, `tools/list`, or `tools/call` on the Streamable HTTP endpoint. `mcp:read` and `mcp:write` are enforced at the protocol boundary.
+5. A tool call becomes a user/tenant/environment-scoped job. The connected desktop leases only jobs for its selected environment.
+6. Reads execute with the desktop's existing delegated Microsoft token. Writes and destructive operations require a native one-time desktop approval.
+7. The desktop returns the result; the backend records byte counts, duration, risk, detected tables/columns/record IDs, and optionally redacted payload values.
 
 The server is stateless at the MCP protocol layer, so `GET` session streams and `DELETE` session termination return `405`; clients use JSON responses to `POST`. The standard endpoint exposes all tools, while the optional final path segment limits discovery and calls to one tool.
 
-The generated client configuration uses a static bearer key for clients that support custom headers. It is not an OAuth authorization-code implementation. Before offering the endpoint to hosted clients that mandate OAuth, add OAuth 2.1 authorization-code + PKCE, resource indicators, authorization-server metadata, and consent. Always terminate TLS at a trusted reverse proxy.
+The generated connection also includes a one-time `qpmcp.*` bearer key for legacy clients that support custom headers but not OAuth. ChatGPT should use OAuth automatic discovery; do not paste the legacy key into ChatGPT. Revoking the Quicker Portal connection invalidates both OAuth grants and the legacy key.
 
 ## Configuration
 
@@ -171,6 +181,11 @@ Every value has a safe default; override with environment variables.
 | `QP_MCP_PUBLIC_BASE_URL` | request origin | Public HTTPS base used in generated MCP endpoints |
 | `QP_MCP_MAX_PAYLOAD_BYTES` | `10485760` | Maximum desktop result/request payload |
 | `QP_MCP_DESKTOP_TIMEOUT_MS` | `55000` | Maximum wait for desktop execution |
+| `QP_MCP_OAUTH_AUTHORIZATION_TTL_SECONDS` | `600` | Pending sign-in/consent lifetime |
+| `QP_MCP_OAUTH_CODE_TTL_SECONDS` | `300` | One-time authorization-code lifetime |
+| `QP_MCP_OAUTH_ACCESS_TTL_SECONDS` | `900` | Resource-bound MCP access-token lifetime |
+| `QP_MCP_OAUTH_REFRESH_TTL_SECONDS` | `2592000` | Rotating refresh-token lifetime |
+| `QP_MCP_OAUTH_MAX_CLIENTS` | `1000` | Retained dynamic OAuth client limit |
 
 ### Verification codes are currently static
 
@@ -214,6 +229,12 @@ Deliberate scope boundaries, and what to do before going live:
   plain HTTP; run it behind a reverse proxy that handles certificates. Only set
   `QP_BACKEND_TRUST_PROXY=1` when a trusted proxy actually sets
   `X-Forwarded-For`, otherwise clients can spoof their rate-limit identity.
+- **Keep MCP OAuth state on durable storage.** OAuth clients, grants, connection
+  records, signing keys, and product accounts currently use `QP_BACKEND_DATA_DIR`.
+  Render's default filesystem is ephemeral, so attach a persistent disk and set
+  this directory to its mount path, or replace the JSON repositories with a
+  transactional database before production. A restart without durable storage
+  invalidates active ChatGPT connections and can also lose product accounts.
 - **Rate-limit counters are per-process.** Running multiple instances needs a
   shared store; the interface in `rate-limit.js` is the seam.
 - **Back up `data/keys/signing-keys.json`.** Losing it invalidates every issued

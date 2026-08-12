@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { config } from '../../config/config.js';
 import { readJsonBody } from '../../core/http/context.js';
 import { authenticateMcpConnection } from './connections.js';
+import { authenticateMcpOAuthToken } from './oauth.js';
 import { MCP_TOOLS, MCP_TOOL_BY_NAME, publicTool } from './tool-catalog.js';
 import { desktopStatus, enqueueDesktopToolCall, waitForDesktopJob } from './broker.js';
 import { recordTransmission } from './analytics.js';
@@ -34,6 +35,28 @@ function validateOrigin(ctx) {
   const origin = String(ctx.req.headers.origin || '');
   if (!origin) return true;
   return config.allowedOrigins.includes(origin);
+}
+
+function publicBaseUrl(ctx) {
+  if (config.mcp.publicBaseUrl) return String(config.mcp.publicBaseUrl).replace(/\/+$/, '');
+  const protocol = process.env.QP_BACKEND_TRUST_PROXY === '1'
+    ? String(ctx.req.headers['x-forwarded-proto'] || 'https').split(',')[0].trim()
+    : ctx.url.protocol.replace(':', '');
+  return `${protocol}://${ctx.req.headers.host}`;
+}
+
+function requestResourceUrl(ctx) {
+  const resource = new URL(`${publicBaseUrl(ctx)}${ctx.pathname}${ctx.url.search}`);
+  resource.searchParams.sort();
+  return resource.toString();
+}
+
+function resourceMetadataUrl(ctx) {
+  return `${publicBaseUrl(ctx)}/.well-known/oauth-protected-resource${ctx.pathname}${ctx.url.search}`;
+}
+
+function hasScope(connection, scope) {
+  return !connection.oauth || connection.scopes?.includes(scope);
 }
 
 function validateSchema(schema, value, path = 'arguments', errors = []) {
@@ -112,27 +135,32 @@ export async function handleMcpRequest(ctx, { scopedToolName } = {}) {
   if (!validateOrigin(ctx)) {
     return sendMcpJson(ctx, 403, jsonRpcError(null, -32000, 'Origin is not allowed.'));
   }
+
+  let connection;
+  try {
+    const authorization = String(ctx.req.headers.authorization || '');
+    connection = authorization.startsWith('Bearer qpmcp.')
+      ? await authenticateMcpConnection({ userId: ctx.params.userId, tenantId: ctx.params.tenantId, authorization })
+      : await authenticateMcpOAuthToken({ authorization, resource: requestResourceUrl(ctx) });
+    if (connection.userId !== ctx.params.userId || connection.tenantId.toLowerCase() !== String(ctx.params.tenantId).toLowerCase()) {
+      throw new Error('The access token is not valid for this MCP endpoint.');
+    }
+  } catch (error) {
+    return sendMcpJson(ctx, 401, jsonRpcError(null, -32001, error.message), {
+      'WWW-Authenticate': `Bearer realm="quicker-portal-mcp", resource_metadata="${resourceMetadataUrl(ctx)}", scope="mcp:read"`
+    });
+  }
+
+  // Authenticate method probes before returning transport capabilities. This
+  // lets hosted clients discover OAuth from an initial GET while authorized
+  // clients still learn that this endpoint uses stateless POST responses.
   if (ctx.method === 'GET') {
-    ctx.res.writeHead(405, { Allow: 'POST, DELETE', 'Cache-Control': 'no-store' });
+    ctx.res.writeHead(405, { Allow: 'POST', 'Cache-Control': 'no-store' });
     return ctx.res.end();
   }
   if (ctx.method === 'DELETE') {
     ctx.res.writeHead(405, { Allow: 'POST', 'Cache-Control': 'no-store' });
     return ctx.res.end();
-  }
-
-  let connection;
-  try {
-    connection = await authenticateMcpConnection({
-      userId: ctx.params.userId,
-      tenantId: ctx.params.tenantId,
-      authorization: ctx.req.headers.authorization
-    });
-  } catch (error) {
-    const baseUrl = String(config.mcp.publicBaseUrl || `${ctx.url.protocol}//${ctx.req.headers.host}`).replace(/\/+$/, '');
-    return sendMcpJson(ctx, 401, jsonRpcError(null, -32001, error.message), {
-      'WWW-Authenticate': `Bearer resource_metadata="${baseUrl}/.well-known/oauth-protected-resource"`
-    });
   }
 
   const entitlements = await entitlementsForUser(connection.userId);
@@ -164,10 +192,16 @@ export async function handleMcpRequest(ctx, { scopedToolName } = {}) {
   if (body.method === 'notifications/initialized' || body.method.startsWith('notifications/')) return sendAccepted(ctx);
   if (body.method === 'ping') return sendMcpJson(ctx, 200, { jsonrpc: '2.0', id: body.id, result: {} });
   if (body.method === 'tools/list') {
+    if (!hasScope(connection, 'mcp:read')) {
+      return sendMcpJson(ctx, 403, jsonRpcError(body.id, -32003, 'The access token needs mcp:read scope.'), {
+        'WWW-Authenticate': `Bearer resource_metadata="${resourceMetadataUrl(ctx)}", error="insufficient_scope", scope="mcp:read"`
+      });
+    }
     const tools = scopedToolName ? MCP_TOOLS.filter(item => item.name === scopedToolName) : MCP_TOOLS;
     return sendMcpJson(ctx, 200, { jsonrpc: '2.0', id: body.id, result: { tools: tools.map(publicTool) } });
   }
   if (body.method === 'resources/list') {
+    if (!hasScope(connection, 'mcp:read')) return sendMcpJson(ctx, 403, jsonRpcError(body.id, -32003, 'The access token needs mcp:read scope.'));
     return sendMcpJson(ctx, 200, { jsonrpc: '2.0', id: body.id, result: { resources: [{
       uri: `quickerportal://environment/${connection.tenantId}/${connection.environmentId}`,
       name: connection.environmentName || connection.tenantName || 'Connected Power Platform environment',
@@ -176,6 +210,7 @@ export async function handleMcpRequest(ctx, { scopedToolName } = {}) {
     }] } });
   }
   if (body.method === 'resources/read') {
+    if (!hasScope(connection, 'mcp:read')) return sendMcpJson(ctx, 403, jsonRpcError(body.id, -32003, 'The access token needs mcp:read scope.'));
     return sendMcpJson(ctx, 200, { jsonrpc: '2.0', id: body.id, result: { contents: [{
       uri: body.params?.uri || `quickerportal://environment/${connection.tenantId}/${connection.environmentId}`,
       mimeType: 'application/json',
@@ -187,6 +222,12 @@ export async function handleMcpRequest(ctx, { scopedToolName } = {}) {
     if (scopedToolName && requestedName !== scopedToolName) return sendMcpJson(ctx, 200, jsonRpcError(body.id, -32602, `This endpoint only exposes ${scopedToolName}.`));
     const tool = MCP_TOOL_BY_NAME.get(requestedName);
     if (!tool) return sendMcpJson(ctx, 200, jsonRpcError(body.id, -32602, `Unknown tool: ${requestedName}.`));
+    const requiredScope = tool.annotations.readOnlyHint ? 'mcp:read' : 'mcp:write';
+    if (!hasScope(connection, requiredScope)) {
+      return sendMcpJson(ctx, 403, jsonRpcError(body.id, -32003, `The access token needs ${requiredScope} scope.`), {
+        'WWW-Authenticate': `Bearer resource_metadata="${resourceMetadataUrl(ctx)}", error="insufficient_scope", scope="${requiredScope}"`
+      });
+    }
     const response = await executeTool(ctx, connection, tool, body.params?.arguments || {}, body.id);
     return sendMcpJson(ctx, 200, response);
   }

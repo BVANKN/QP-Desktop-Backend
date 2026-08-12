@@ -1,13 +1,27 @@
 import { authenticate } from '../../core/middleware/authenticate.js';
-import { readJsonBody, sendJson } from '../../core/http/context.js';
+import { readFormBody, readJsonBody, sendHtml, sendJson, sendRedirect } from '../../core/http/context.js';
 import { config } from '../../config/config.js';
-import { createMcpConnection, listMcpConnections, mcpResourceMetadata, revokeMcpConnection } from './connections.js';
+import { createMcpConnection, listMcpConnections, mcpConnectionEndpoint, mcpResourceMetadata, revokeMcpConnection } from './connections.js';
 import { claimDesktopJobs, completeDesktopJob, desktopStatus, heartbeatDesktop } from './broker.js';
 import { queryTransmissionAnalytics } from './analytics.js';
 import { MCP_TOOLS } from './tool-catalog.js';
 import { handleMcpRequest } from './protocol.js';
 import { entitlementsForUser } from '../plans/subscription-store.js';
 import { ForbiddenError } from '../../core/errors.js';
+import { consumeRateLimit } from '../../core/middleware/rate-limit.js';
+import {
+  OAuthError,
+  authorizationServerMetadata,
+  beginAuthorization,
+  completeAuthorization,
+  exchangeAuthorizationCode,
+  oauthErrorBody,
+  refreshOAuthToken,
+  registerOAuthClient,
+  renderAuthorizationPage,
+  resumeAuthorization,
+  revokeOAuthToken
+} from './oauth.js';
 
 async function requireMcpEntitlement(ctx) {
   const entitlements = await entitlementsForUser(ctx.auth.sub);
@@ -16,7 +30,7 @@ async function requireMcpEntitlement(ctx) {
   }
 }
 
-function endpointBase(ctx) {
+export function endpointBase(ctx) {
   if (config.mcp.publicBaseUrl) return config.mcp.publicBaseUrl.replace(/\/+$/, '');
   const protocol = process.env.QP_BACKEND_TRUST_PROXY === '1'
     ? String(ctx.req.headers['x-forwarded-proto'] || 'https').split(',')[0].trim()
@@ -24,9 +38,106 @@ function endpointBase(ctx) {
   return `${protocol}://${ctx.req.headers.host}`;
 }
 
+function protectedResourceUrl(ctx) {
+  const base = endpointBase(ctx);
+  const prefix = '/.well-known/oauth-protected-resource';
+  const resourcePath = ctx.pathname.startsWith(`${prefix}/`) ? ctx.pathname.slice(prefix.length) : '/mcp';
+  return `${base}${resourcePath}${ctx.url.search}`;
+}
+
+function sendOAuthError(ctx, error) {
+  const status = error instanceof OAuthError ? error.status : 500;
+  sendJson(ctx, status, oauthErrorBody(error));
+}
+
+function sendAuthorizationErrorPage(ctx, error) {
+  const message = error?.expose === false ? 'The authorization request failed.' : error?.message || 'The authorization request failed.';
+  sendHtml(ctx, error?.status || 400, `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Authorization failed</title><style>body{font:14px "Segoe UI",sans-serif;background:#f5f5f5;color:#242424;display:grid;place-items:center;min-height:100vh;margin:0}.card{max-width:540px;background:#fff;border:1px solid #ddd;padding:28px;box-shadow:0 8px 28px #0002}h1{font-size:22px;font-weight:600;color:#a4262c}p{line-height:1.5}</style></head><body><main class="card"><h1>Authorization could not be completed</h1><p>${String(message).replace(/[&<>"']/g, value => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[value])}</p><p>Return to ChatGPT and try connecting again.</p></main></body></html>`);
+}
+
 export function registerMcpRoutes(router) {
   router.get('/.well-known/oauth-protected-resource', ctx => {
     sendJson(ctx, 200, mcpResourceMetadata(`${endpointBase(ctx)}/mcp`, endpointBase(ctx)));
+  });
+  router.get('/.well-known/oauth-protected-resource/mcp/:userId/:tenantId', ctx => {
+    sendJson(ctx, 200, mcpResourceMetadata(protectedResourceUrl(ctx), endpointBase(ctx)));
+  });
+  router.get('/.well-known/oauth-protected-resource/mcp/:userId/:tenantId/:toolName', ctx => {
+    sendJson(ctx, 200, mcpResourceMetadata(protectedResourceUrl(ctx), endpointBase(ctx)));
+  });
+
+  router.get('/.well-known/oauth-authorization-server', ctx => {
+    sendJson(ctx, 200, authorizationServerMetadata(endpointBase(ctx)));
+  });
+  router.post('/oauth/register', async ctx => {
+    consumeRateLimit('oauth-register', ctx.ip, config.rateLimit.oauthRegister);
+    try {
+      const client = await registerOAuthClient(await readJsonBody(ctx));
+      sendJson(ctx, 201, client);
+    } catch (error) {
+      sendOAuthError(ctx, error);
+    }
+  });
+  router.get('/oauth/authorize', async ctx => {
+    consumeRateLimit('oauth-authorize', ctx.ip, config.rateLimit.oauthAuthorize);
+    try {
+      const model = await beginAuthorization(ctx.url.searchParams, endpointBase(ctx), {
+        ip: ctx.ip,
+        userAgent: ctx.req.headers['user-agent']
+      });
+      sendHtml(ctx, 200, renderAuthorizationPage(model));
+    } catch (error) {
+      sendAuthorizationErrorPage(ctx, error);
+    }
+  });
+  router.post('/oauth/authorize', async ctx => {
+    consumeRateLimit('oauth-authorize', ctx.ip, config.rateLimit.oauthAuthorize);
+    const form = await readFormBody(ctx);
+    const requestId = form.get('requestId') || '';
+    const csrf = form.get('csrf') || '';
+    try {
+      const redirect = await completeAuthorization({
+        requestId,
+        csrf,
+        decision: form.get('decision') || 'approve',
+        identifier: form.get('identifier') || '',
+        password: form.get('password') || '',
+        connectionId: form.get('connectionId') || ''
+      }, { ip: ctx.ip, userAgent: ctx.req.headers['user-agent'] });
+      sendRedirect(ctx, redirect);
+    } catch (error) {
+      try {
+        const model = await resumeAuthorization(requestId, csrf);
+        sendHtml(ctx, error?.status || 400, renderAuthorizationPage(model, { error: error.message }));
+      } catch {
+        sendAuthorizationErrorPage(ctx, error);
+      }
+    }
+  });
+  router.post('/oauth/token', async ctx => {
+    consumeRateLimit('oauth-token', ctx.ip, config.rateLimit.oauthToken);
+    try {
+      const form = await readFormBody(ctx);
+      const input = Object.fromEntries(form);
+      let tokens;
+      if (input.grant_type === 'authorization_code') tokens = await exchangeAuthorizationCode(input);
+      else if (input.grant_type === 'refresh_token') tokens = await refreshOAuthToken(input);
+      else throw new OAuthError('unsupported_grant_type', 'Only authorization_code and refresh_token are supported.');
+      sendJson(ctx, 200, tokens, { Pragma: 'no-cache' });
+    } catch (error) {
+      sendOAuthError(ctx, error);
+    }
+  });
+  router.post('/oauth/revoke', async ctx => {
+    consumeRateLimit('oauth-token', ctx.ip, config.rateLimit.oauthToken);
+    try {
+      const form = await readFormBody(ctx);
+      await revokeOAuthToken(Object.fromEntries(form));
+      ctx.res.writeHead(200, { 'Cache-Control': 'no-store' });
+      ctx.res.end();
+    } catch (error) {
+      sendOAuthError(ctx, error);
+    }
   });
 
   router.get('/api/mcp/tools', authenticate, requireMcpEntitlement, ctx => {
@@ -36,7 +147,7 @@ export function registerMcpRoutes(router) {
     const connections = await listMcpConnections(ctx.auth.sub);
     sendJson(ctx, 200, { ok: true, connections: connections.map(connection => ({
       ...connection,
-      endpoint: `${endpointBase(ctx)}/mcp/${encodeURIComponent(ctx.auth.sub)}/${encodeURIComponent(connection.tenantId)}`,
+      endpoint: mcpConnectionEndpoint(endpointBase(ctx), connection),
       desktop: desktopStatus(ctx.auth.sub, connection.tenantId, connection.environmentId)
     })) });
   });

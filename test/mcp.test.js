@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { useTemporaryDataDir, startTestServer, readLatestCode, VALID_PASSWORD } from './helpers/test-server.js';
 
 const dataDir = useTemporaryDataDir();
@@ -77,6 +78,153 @@ test('MCP keys are tenant-scoped and invalid keys advertise protected-resource m
   const wrongTenant = await mcpCall(session, connection, 'tools/list', undefined, 1, '99999999-2222-3333-4444-555555555555');
   assert.equal(wrongTenant.status, 401);
   assert.match(wrongTenant.headers.get('www-authenticate') || '', /\.well-known\/oauth-protected-resource/);
+});
+
+test('ChatGPT-compatible OAuth discovery, DCR, PKCE, refresh rotation, and MCP access work end to end', async () => {
+  const session = await registerUser('mcpoauth', 'pro');
+  const connection = await createConnection(session);
+  const resource = connection.endpoint;
+
+  const unauthenticatedProbe = await server.call('GET', new URL(resource).pathname + new URL(resource).search);
+  assert.equal(unauthenticatedProbe.status, 401);
+  assert.match(unauthenticatedProbe.headers.get('www-authenticate') || '', /resource_metadata="[^\"]+\.well-known\/oauth-protected-resource\/mcp\//);
+
+  const protectedMetadata = await server.call('GET', `/.well-known/oauth-protected-resource/mcp/${encodeURIComponent(session.user.id)}/${encodeURIComponent(tenantId)}?connection_id=${encodeURIComponent(connection.connection.id)}`);
+  assert.equal(protectedMetadata.status, 200, JSON.stringify(protectedMetadata.body));
+  assert.equal(protectedMetadata.body.resource, resource);
+  assert.deepEqual(protectedMetadata.body.authorization_servers, [server.baseUrl]);
+
+  const serverMetadata = await server.call('GET', '/.well-known/oauth-authorization-server');
+  assert.equal(serverMetadata.status, 200, JSON.stringify(serverMetadata.body));
+  assert.deepEqual(serverMetadata.body.code_challenge_methods_supported, ['S256']);
+  assert.ok(serverMetadata.body.scopes_supported.includes('offline_access'));
+
+  const callback = 'https://chatgpt.com/connector/oauth/qp-test';
+  const registered = await server.call('POST', '/oauth/register', {
+    client_name: 'ChatGPT OAuth test',
+    redirect_uris: [callback],
+    grant_types: ['authorization_code', 'refresh_token'],
+    response_types: ['code'],
+    token_endpoint_auth_method: 'none'
+  });
+  assert.equal(registered.status, 201, JSON.stringify(registered.body));
+
+  const verifier = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~';
+  const challenge = createHash('sha256').update(verifier).digest('base64url');
+  const authQuery = new URLSearchParams({
+    response_type: 'code',
+    client_id: registered.body.client_id,
+    redirect_uri: callback,
+    code_challenge: challenge,
+    code_challenge_method: 'S256',
+    scope: 'mcp:read mcp:write offline_access',
+    resource,
+    state: 'oauth-state-test'
+  });
+  const authorizePage = await fetch(`${server.baseUrl}/oauth/authorize?${authQuery}`);
+  assert.equal(authorizePage.status, 200);
+  const html = await authorizePage.text();
+  const requestId = html.match(/name="requestId" value="([^"]+)"/)?.[1];
+  const csrf = html.match(/name="csrf" value="([^"]+)"/)?.[1];
+  assert.ok(requestId && csrf, 'Authorization page did not include a protected transaction.');
+
+  const approval = await fetch(`${server.baseUrl}/oauth/authorize`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    redirect: 'manual',
+    body: new URLSearchParams({
+      requestId,
+      csrf,
+      decision: 'approve',
+      identifier: 'mcpoauth',
+      password: VALID_PASSWORD,
+      connectionId: connection.connection.id
+    })
+  });
+  assert.equal(approval.status, 302, await approval.text());
+  const callbackUrl = new URL(approval.headers.get('location'));
+  assert.equal(callbackUrl.searchParams.get('state'), 'oauth-state-test');
+  const code = callbackUrl.searchParams.get('code');
+  assert.ok(code);
+
+  const tokenResponse = await fetch(`${server.baseUrl}/oauth/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'authorization_code',
+      client_id: registered.body.client_id,
+      redirect_uri: callback,
+      code,
+      code_verifier: verifier,
+      resource
+    })
+  });
+  const tokens = await tokenResponse.json();
+  assert.equal(tokenResponse.status, 200, JSON.stringify(tokens));
+  assert.match(tokens.access_token, /^qpoat\./);
+  assert.match(tokens.refresh_token, /^qport\./);
+
+  const initialized = await server.call('POST', new URL(resource).pathname + new URL(resource).search, {
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'initialize',
+    params: { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'ChatGPT test', version: '1' } }
+  }, { headers: { Authorization: `Bearer ${tokens.access_token}`, 'MCP-Protocol-Version': '2025-11-25' } });
+  assert.equal(initialized.status, 200, JSON.stringify(initialized.body));
+  assert.equal(initialized.body.result.protocolVersion, '2025-11-25');
+
+  const wrongAudience = await server.call('POST', new URL(resource).pathname, {
+    jsonrpc: '2.0',
+    id: 2,
+    method: 'tools/list'
+  }, { headers: { Authorization: `Bearer ${tokens.access_token}`, 'MCP-Protocol-Version': '2025-11-25' } });
+  assert.equal(wrongAudience.status, 401, 'An access token must be bound to the exact MCP resource URI.');
+
+  const refreshResponse = await fetch(`${server.baseUrl}/oauth/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'refresh_token',
+      client_id: registered.body.client_id,
+      refresh_token: tokens.refresh_token,
+      resource
+    })
+  });
+  const refreshed = await refreshResponse.json();
+  assert.equal(refreshResponse.status, 200, JSON.stringify(refreshed));
+  assert.notEqual(refreshed.refresh_token, tokens.refresh_token);
+
+  const replayResponse = await fetch(`${server.baseUrl}/oauth/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'refresh_token',
+      client_id: registered.body.client_id,
+      refresh_token: tokens.refresh_token,
+      resource
+    })
+  });
+  assert.equal(replayResponse.status, 400);
+  assert.equal((await replayResponse.json()).error, 'invalid_grant');
+
+  const revokedAfterReplay = await server.call('POST', new URL(resource).pathname + new URL(resource).search, {
+    jsonrpc: '2.0',
+    id: 3,
+    method: 'tools/list'
+  }, { headers: { Authorization: `Bearer ${refreshed.access_token}`, 'MCP-Protocol-Version': '2025-11-25' } });
+  assert.equal(revokedAfterReplay.status, 401, 'Refresh-token replay must revoke the complete OAuth grant family.');
+});
+
+test('OAuth client registration rejects unsafe redirect URIs', async () => {
+  const rejected = await server.call('POST', '/oauth/register', {
+    client_name: 'Unsafe OAuth client',
+    redirect_uris: ['http://attacker.example/callback'],
+    grant_types: ['authorization_code', 'refresh_token'],
+    response_types: ['code'],
+    token_endpoint_auth_method: 'none'
+  });
+  assert.equal(rejected.status, 400);
+  assert.equal(rejected.body.error, 'invalid_redirect_uri');
 });
 
 test('tool validation occurs before dispatch and offline desktop state is explicit', async () => {

@@ -41,9 +41,19 @@ export const config = Object.freeze({
   requestTimeoutMs: intEnv('QP_BACKEND_REQUEST_TIMEOUT_MS', 15_000),
 
   mcp: Object.freeze({
-    publicBaseUrl: process.env.QP_MCP_PUBLIC_BASE_URL || '',
+    // Render supplies RENDER_EXTERNAL_URL for public web services. Prefer an
+    // explicit value elsewhere so OAuth metadata never advertises an internal
+    // HTTP origin when TLS terminates at the hosting edge.
+    publicBaseUrl: process.env.QP_MCP_PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || '',
     maxPayloadBytes: intEnv('QP_MCP_MAX_PAYLOAD_BYTES', 10 * 1024 * 1024),
-    desktopTimeoutMs: intEnv('QP_MCP_DESKTOP_TIMEOUT_MS', 55_000)
+    desktopTimeoutMs: intEnv('QP_MCP_DESKTOP_TIMEOUT_MS', 55_000),
+    oauth: Object.freeze({
+      authorizationTtlSeconds: intEnv('QP_MCP_OAUTH_AUTHORIZATION_TTL_SECONDS', 10 * 60),
+      codeTtlSeconds: intEnv('QP_MCP_OAUTH_CODE_TTL_SECONDS', 5 * 60),
+      accessTtlSeconds: intEnv('QP_MCP_OAUTH_ACCESS_TTL_SECONDS', 15 * 60),
+      refreshTtlSeconds: intEnv('QP_MCP_OAUTH_REFRESH_TTL_SECONDS', 30 * 24 * 60 * 60),
+      maxClients: intEnv('QP_MCP_OAUTH_MAX_CLIENTS', 1000)
+    })
   }),
 
   token: Object.freeze({
@@ -99,7 +109,10 @@ export const config = Object.freeze({
     signup: { windowMs: 60 * 60_000, max: 20 },
     verify: { windowMs: 60_000, max: 10 },
     resend: { windowMs: 60 * 60_000, max: 10 },
-    refresh: { windowMs: 60_000, max: 30 }
+    refresh: { windowMs: 60_000, max: 30 },
+    oauthRegister: { windowMs: 60 * 60_000, max: 30 },
+    oauthAuthorize: { windowMs: 60_000, max: 20 },
+    oauthToken: { windowMs: 60_000, max: 60 }
   }),
 
   mail: Object.freeze({

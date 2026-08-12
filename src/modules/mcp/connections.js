@@ -67,7 +67,7 @@ export async function createMcpConnection(userId, input, endpointBase) {
     document.connections.push(record);
     return { result: record };
   });
-  const endpoint = `${String(endpointBase).replace(/\/+$/, '')}/mcp/${encodeURIComponent(userId)}/${encodeURIComponent(tenantId)}`;
+  const endpoint = mcpConnectionEndpoint(endpointBase, record);
   return {
     connection: publicConnection(record),
     apiKey,
@@ -76,6 +76,12 @@ export async function createMcpConnection(userId, input, endpointBase) {
       type: 'http',
       url: endpoint,
       headers: { Authorization: `Bearer ${apiKey}` }
+    },
+    oauth: {
+      url: endpoint,
+      authentication: 'oauth',
+      discovery: 'automatic',
+      scopes: ['mcp:read', 'mcp:write', 'offline_access']
     }
   };
 }
@@ -83,6 +89,26 @@ export async function createMcpConnection(userId, input, endpointBase) {
 export async function listMcpConnections(userId) {
   const document = await store.read();
   return document.connections.filter(item => item.userId === userId).map(publicConnection);
+}
+
+export function mcpConnectionEndpoint(endpointBase, connection) {
+  const base = String(endpointBase).replace(/\/+$/, '');
+  const path = `/mcp/${encodeURIComponent(connection.userId)}/${encodeURIComponent(connection.tenantId)}`;
+  return `${base}${path}?connection_id=${encodeURIComponent(connection.id)}`;
+}
+
+export async function findMcpConnectionById(connectionId) {
+  const document = await store.read();
+  return document.connections.find(item => item.id === connectionId) || null;
+}
+
+export async function activeMcpConnectionsForResource({ userId, tenantId }) {
+  const document = await store.read();
+  return document.connections.filter(item => (
+    item.enabled
+    && item.userId === userId
+    && item.tenantId.toLowerCase() === String(tenantId).toLowerCase()
+  ));
 }
 
 export async function revokeMcpConnection(userId, connectionId) {
@@ -126,8 +152,10 @@ export function mcpResourceMetadata(resourceUrl, serviceBaseUrl) {
   return {
     resource: resourceUrl,
     resource_name: 'Quicker Portal Power Platform MCP',
+    authorization_servers: [serviceBaseUrl.replace(/\/+$/, '')],
+    scopes_supported: ['mcp:read', 'mcp:write', 'offline_access'],
     bearer_methods_supported: ['header'],
     resource_documentation: `${serviceBaseUrl.replace(/\/+$/, '')}/api/mcp/connections`,
-    quicker_portal_authentication: 'tenant-scoped-static-bearer-key'
+    quicker_portal_authentication: 'oauth-2.1-pkce-or-tenant-scoped-static-bearer-key'
   };
 }
