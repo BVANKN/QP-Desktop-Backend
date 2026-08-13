@@ -27,6 +27,7 @@ function tool(name, action, description, inputSchema = object(), options = {}) {
     },
     risk: options.destructive ? 'destructive' : readOnly ? 'read' : 'write',
     fixedArguments: options.fixedArguments || undefined,
+    argumentEnvelope: options.argumentEnvelope || undefined,
     timeoutMs: options.timeoutMs || 55_000
   });
 }
@@ -40,7 +41,7 @@ const commandSurface = { type: 'string', enum: ['mainGrid', 'mainForm', 'subgrid
 const commandParameter = object({
   type: { type: 'string', enum: ['CrmParameter', 'StringParameter', 'BoolParameter', 'IntParameter', 'DecimalParameter'], description: 'Ribbon command parameter element type.' },
   name: string('Parameter name. Required for URL parameters.'),
-  value: { description: 'Parameter value. CrmParameter values include PrimaryControl, SelectedControl, SelectedControlSelectedItemIds, and PrimaryEntityTypeName.' }
+  value: string('Serialized parameter value. CrmParameter values include PrimaryControl, SelectedControl, SelectedControlSelectedItemIds, and PrimaryEntityTypeName.')
 }, ['type', 'value']);
 const commandAction = object({
   type: { type: 'string', enum: ['javascript', 'url'], description: 'Command action type.' },
@@ -49,62 +50,58 @@ const commandAction = object({
   url: string('Absolute HTTPS URL for a URL action.'),
   parameters: array(commandParameter, 'Ordered action parameters.', { maxItems: 24 })
 }, ['type']);
-const commandRule = object({
-  id: string('Optional stable rule identifier. Omit to generate one.'),
-  type: { type: 'string', enum: ['EntityRule', 'FormStateRule', 'FormTypeRule', 'SelectionCountRule', 'ValueRule', 'EntityPrivilegeRule', 'RecordPrivilegeRule', 'EntityPropertyRule', 'OrganizationSettingRule', 'CustomRule'], description: 'Supported classic rule condition.' },
-  entityName: tableName,
-  context: string('EntityRule context.'),
-  appliesTo: string('Rule target such as SelectedEntity.'),
-  state: string('Form state such as Existing or Create.'),
-  formType: string('Form type such as Main.'),
-  minimum: number('Minimum selected rows.'),
-  maximum: number('Maximum selected rows.'),
-  field: columnName,
-  value: { description: 'Expected ValueRule value.' },
-  privilegeType: string('Privilege such as Read, Write, Create, or Delete.'),
-  privilegeDepth: string('Privilege depth such as Basic, Local, Deep, or Global.'),
-  propertyName: string('Entity property name.'),
-  propertyValue: { description: 'Expected entity property value.' },
-  setting: string('Organization setting name.'),
-  library: string('JavaScript web resource for an enable-rule CustomRule.'),
-  functionName: string('CustomRule JavaScript function.'),
-  parameters: array(commandParameter, 'Ordered CustomRule parameters.', { maxItems: 24 }),
-  defaultValue: boolean('Default result when the rule cannot be evaluated.'),
-  invertResult: boolean('Invert the evaluated result.'),
-  attributes: { type: 'object', description: 'Advanced RibbonDiffXml attributes used when cloning an existing supported rule.', additionalProperties: true }
-}, ['type']);
-const commandDefinition = object({
-  prefix: string('Publisher prefix used in generated identifiers, for example contoso.'),
+const commandRuleType = {
+  type: 'string',
+  enum: ['EntityRule', 'FormStateRule', 'FormTypeRule', 'SelectionCountRule', 'ValueRule', 'EntityPrivilegeRule', 'RecordPrivilegeRule', 'EntityPropertyRule', 'OrganizationSettingRule', 'CustomRule'],
+  description: 'Classic ribbon rule condition.'
+};
+const commandRule = {
+  type: 'object',
+  description: 'One rule. Besides type, use the rule-specific fields returned by get_command_bar_control (for example field/value, minimum/maximum, privilegeType, or library/functionName/parameters).',
+  properties: { type: commandRuleType },
+  required: ['type'],
+  additionalProperties: true
+};
+const commandDefinitionProperties = {
   name: string('Unique command name used to generate stable RibbonDiffXml identifiers.'),
   label: string('Visible command label.'),
-  description: string('Tooltip description.'),
   surface: commandSurface,
-  sequence: number('Placement sequence, starting at 1.', { minimum: 1 }),
-  controlType: { type: 'string', enum: ['button', 'dropdown', 'split'], description: 'Control presentation.' },
-  image16: string('Optional 16x16 image reference.'),
-  image32: string('Optional 32x32 image reference.'),
-  action: commandAction,
-  displayRules: array(commandRule, 'Complete display-rule set for this command.', { maxItems: 32 }),
-  enableRules: array(commandRule, 'Complete enable-rule set for this command.', { maxItems: 32 })
-});
-const createCommandDefinition = object(commandDefinition.properties, ['name', 'label', 'surface', 'action']);
-const cloneCommandDefinition = object(commandDefinition.properties, ['name']);
-const commandChanges = object({
-  label: string('New visible label.'),
-  description: string('New tooltip description.'),
-  surface: commandSurface,
-  sequence: number('New placement sequence.', { minimum: 1 }),
-  image16: string('New 16x16 image reference; pass an empty string to remove it.'),
-  image32: string('New 32x32 image reference; pass an empty string to remove it.'),
-  action: commandAction,
-  displayRules: array(commandRule, 'Replacement display-rule set. Pass an empty array to remove all display rules.', { maxItems: 32 }),
-  enableRules: array(commandRule, 'Replacement enable-rule set. Pass an empty array to remove all enable rules.', { maxItems: 32 })
-});
+  action: commandAction
+};
+const createCommandDefinition = {
+  type: 'object',
+  description: 'Command definition. Required: name, label, surface, action. Optional: prefix, description, sequence, controlType, image16, image32, displayRules, and enableRules.',
+  properties: commandDefinitionProperties,
+  required: ['name', 'label', 'surface', 'action'],
+  additionalProperties: true
+};
+const cloneCommandDefinition = {
+  type: 'object',
+  description: 'Clone overrides. name is required; optional properties match create_command_bar_control.command.',
+  properties: {
+    name: commandDefinitionProperties.name,
+    label: commandDefinitionProperties.label,
+    surface: commandDefinitionProperties.surface,
+    sequence: number('New placement sequence.', { minimum: 1 })
+  },
+  required: ['name'],
+  additionalProperties: true
+};
+const commandChanges = {
+  type: 'object',
+  description: 'Fields to replace. Supports label, description, surface, sequence, image16, image32, action, displayRules, and enableRules. Rule arrays replace the complete corresponding set; omitted fields are preserved.',
+  properties: {
+    label: string('New visible label.'),
+    surface: commandSurface,
+    sequence: number('New placement sequence.', { minimum: 1 }),
+    action: commandAction
+  },
+  additionalProperties: true
+};
 const commandChangeContext = {
   logicalName: tableName,
   solutionUniqueName: string('Unmanaged solution unique name that owns the command-bar customization.'),
   controlId: string('Exact command-bar control identifier.'),
-  command: commandDefinition,
   changes: commandChanges,
   displayRules: array(commandRule, 'Complete replacement display-rule set.', { maxItems: 32 }),
   enableRules: array(commandRule, 'Complete replacement enable-rule set.', { maxItems: 32 }),
@@ -112,6 +109,11 @@ const commandChangeContext = {
   surface: commandSurface,
   includeXml: boolean('Include generated RibbonDiffXml in preview output. Leave false for smaller MCP responses.'),
   confirm: boolean('Must be true after explicit user approval of deployment and publish.')
+};
+const commandPreviewMutation = {
+  type: 'object',
+  description: 'Operation-specific payload. create: command. clone: controlId, optional surface/command/copyRules. update: controlId/changes. rules: controlId and displayRules and/or enableRules. hide, unhide, or delete: controlId. includeXml is optional for every operation.',
+  additionalProperties: true
 };
 
 export const MCP_TOOLS = Object.freeze([
@@ -223,9 +225,11 @@ export const MCP_TOOLS = Object.freeze([
     surface: { type: 'string', enum: ['all', 'mainGrid', 'mainForm', 'subgrid', 'associated', 'quickForm', 'globalHeader', 'dashboard', 'other'], description: 'Optional surface disambiguation.' }
   }, ['logicalName', 'controlId']), { fixedArguments: { detail: true, limit: 10 } }),
   tool('preview_command_bar_change', 'previewRibbonCommandChange', 'Compile and validate a semantic classic command-bar change without importing or publishing it. Always preview before a live command-bar mutation.', object({
-    ...commandChangeContext,
-    operation: { type: 'string', enum: ['create', 'clone', 'update', 'rules', 'hide', 'unhide', 'delete'], description: 'Change to preview.' }
-  }, ['logicalName', 'solutionUniqueName', 'operation'])),
+    logicalName: commandChangeContext.logicalName,
+    solutionUniqueName: commandChangeContext.solutionUniqueName,
+    operation: { type: 'string', enum: ['create', 'clone', 'update', 'rules', 'hide', 'unhide', 'delete'], description: 'Change to preview.' },
+    mutation: commandPreviewMutation
+  }, ['logicalName', 'solutionUniqueName', 'operation', 'mutation']), { argumentEnvelope: 'mutation' }),
   tool('create_command_bar_control', 'applyRibbonCommandChange', 'Create and publish a classic button, dropdown, or split button on a main grid, main form, subgrid, or associated view in an unmanaged solution. Deployment has automatic recovery and returns a rollback token.', object({
     logicalName: commandChangeContext.logicalName,
     solutionUniqueName: commandChangeContext.solutionUniqueName,

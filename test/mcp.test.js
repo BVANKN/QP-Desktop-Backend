@@ -48,6 +48,29 @@ function mcpCall(session, connection, method, params, id = 1, tenant = tenantId)
   }, { headers: { Authorization: `Bearer ${connection.apiKey}`, 'MCP-Protocol-Version': '2025-11-25' } });
 }
 
+async function collectToolPages(callPage) {
+  const tools = [];
+  const pageSizes = [];
+  const cursors = new Set();
+  let cursor;
+  do {
+    const response = await callPage(cursor);
+    assert.equal(response.status, 200, JSON.stringify(response.body));
+    assert.ok(Array.isArray(response.body.result?.tools), JSON.stringify(response.body));
+    const serializedBytes = Buffer.byteLength(JSON.stringify(response.body));
+    assert.ok(serializedBytes < 52 * 1024, `Tool discovery page is too large: ${serializedBytes} bytes.`);
+    tools.push(...response.body.result.tools);
+    pageSizes.push(serializedBytes);
+    cursor = response.body.result.nextCursor;
+    if (cursor) {
+      assert.equal(typeof cursor, 'string');
+      assert.ok(!cursors.has(cursor), `Repeated pagination cursor: ${cursor}`);
+      cursors.add(cursor);
+    }
+  } while (cursor);
+  return { tools, pageSizes };
+}
+
 test('free users cannot create MCP connections', async () => {
   const session = await registerUser('mcpfree', 'free');
   const result = await server.call('POST', '/api/mcp/connections', { tenantId, environmentId }, { accessToken: session.accessToken });
@@ -64,12 +87,25 @@ test('Pro users can initialize MCP and discover the governed tool catalog', asyn
   assert.equal(initialized.status, 200, JSON.stringify(initialized.body));
   assert.equal(initialized.body.result.protocolVersion, '2025-11-25');
 
-  const tools = await mcpCall(session, connection, 'tools/list');
-  assert.equal(tools.status, 200, JSON.stringify(tools.body));
-  assert.ok(tools.body.result.tools.length >= 70);
-  assert.ok(tools.body.result.tools.some(tool => tool.name === 'query_records'));
-  assert.ok(tools.body.result.tools.some(tool => tool.name === 'update_form'));
-  assert.ok(tools.body.result.tools.some(tool => tool.name === 'register_plugin_artifact'));
+  let catalogRequestId = 10;
+  const catalog = await collectToolPages(cursor => mcpCall(
+    session,
+    connection,
+    'tools/list',
+    cursor ? { cursor } : {},
+    catalogRequestId++
+  ));
+  assert.ok(catalog.tools.length >= 80);
+  assert.ok(catalog.pageSizes.length > 1, 'The large catalog must be paginated.');
+  assert.equal(new Set(catalog.tools.map(tool => tool.name)).size, catalog.tools.length);
+  assert.ok(catalog.tools.some(tool => tool.name === 'query_records'));
+  assert.ok(catalog.tools.some(tool => tool.name === 'update_form'));
+  assert.ok(catalog.tools.some(tool => tool.name === 'register_plugin_artifact'));
+  assert.ok(catalog.tools.some(tool => tool.name === 'create_command_bar_control'));
+
+  const invalidCursor = await mcpCall(session, connection, 'tools/list', { cursor: 'not-a-valid-cursor' }, 99);
+  assert.equal(invalidCursor.status, 200);
+  assert.equal(invalidCursor.body.error?.code, -32602);
 });
 
 test('MCP keys are tenant-scoped and invalid keys advertise protected-resource metadata', async () => {
@@ -215,15 +251,21 @@ test('ChatGPT-compatible OAuth discovery, DCR, PKCE, refresh rotation, and MCP a
   assert.equal(initialized.status, 200, JSON.stringify(initialized.body));
   assert.equal(initialized.body.result.protocolVersion, '2025-11-25');
 
-  const listedTools = await server.call('POST', new URL(resource).pathname + new URL(resource).search, {
-    jsonrpc: '2.0',
-    id: 2,
-    method: 'tools/list',
-    params: {}
-  }, { headers: { Authorization: `Bearer ${tokens.access_token}`, 'MCP-Protocol-Version': '2025-11-25' } });
-  assert.equal(listedTools.status, 200, JSON.stringify(listedTools.body));
-  assert.ok(listedTools.body.result.tools.length > 20);
-  assert.ok(listedTools.body.result.tools.every(tool => tool.name && tool.description && tool.inputSchema?.type === 'object'));
+  let oauthCatalogRequestId = 20;
+  const listedCatalog = await collectToolPages(cursor => server.call(
+    'POST',
+    new URL(resource).pathname + new URL(resource).search,
+    {
+      jsonrpc: '2.0',
+      id: oauthCatalogRequestId++,
+      method: 'tools/list',
+      params: cursor ? { cursor } : {}
+    },
+    { headers: { Authorization: `Bearer ${tokens.access_token}`, 'MCP-Protocol-Version': '2025-11-25' } }
+  ));
+  assert.ok(listedCatalog.tools.length >= 80);
+  assert.ok(listedCatalog.pageSizes.length > 1);
+  assert.ok(listedCatalog.tools.every(tool => tool.name && tool.description && tool.inputSchema?.type === 'object'));
 
   // Existing connectors may have been authorized before write tools were
   // advertised. Their reconnect challenge must request the complete durable
@@ -392,10 +434,41 @@ test('tool calls traverse the desktop broker and become environment-scoped analy
   assert.equal(response.body.result.isError, false);
   assert.equal(response.body.result.structuredContent.value[0].name, 'Acme');
 
+  const pendingPreview = mcpCall(session, connection, 'tools/call', {
+    name: 'preview_command_bar_change',
+    arguments: {
+      logicalName: 'account',
+      solutionUniqueName: 'qp_unmanaged',
+      operation: 'hide',
+      mutation: { controlId: 'Mscrm.HomepageGrid.account.NewRecord', includeXml: false }
+    }
+  }, 44);
+  await new Promise(resolve => setTimeout(resolve, 40));
+  const previewLease = await server.call('GET', `/api/mcp/bridge/jobs?${query}`, undefined, { accessToken: session.accessToken });
+  assert.equal(previewLease.status, 200, JSON.stringify(previewLease.body));
+  assert.equal(previewLease.body.jobs.length, 1);
+  assert.equal(previewLease.body.jobs[0].action, 'previewRibbonCommandChange');
+  assert.deepEqual(previewLease.body.jobs[0].arguments, {
+    logicalName: 'account',
+    solutionUniqueName: 'qp_unmanaged',
+    operation: 'hide',
+    controlId: 'Mscrm.HomepageGrid.account.NewRecord',
+    includeXml: false
+  });
+  const previewCompleted = await server.call('POST', `/api/mcp/bridge/jobs/${previewLease.body.jobs[0].id}/complete`, {
+    leaseToken: previewLease.body.jobs[0].leaseToken,
+    result: { ok: true, result: { valid: true } }
+  }, { accessToken: session.accessToken });
+  assert.equal(previewCompleted.status, 200, JSON.stringify(previewCompleted.body));
+  const previewResponse = await pendingPreview;
+  assert.equal(previewResponse.status, 200, JSON.stringify(previewResponse.body));
+  assert.equal(previewResponse.body.result.structuredContent.valid, true);
+
   const analytics = await server.call('GET', `/api/mcp/analytics?tenantId=${tenantId}&environmentId=${environmentId}`, undefined, { accessToken: session.accessToken });
   assert.equal(analytics.status, 200, JSON.stringify(analytics.body));
-  assert.equal(analytics.body.analytics.summary.totalCalls, 1);
-  assert.deepEqual(analytics.body.analytics.transmissions[0].tables, ['account']);
-  assert.ok(analytics.body.analytics.transmissions[0].columns.includes('name'));
-  assert.ok(analytics.body.analytics.transmissions[0].columns.includes('accountnumber'));
+  assert.equal(analytics.body.analytics.summary.totalCalls, 2);
+  const queryTransmission = analytics.body.analytics.transmissions.find(item => item.toolName === 'query_records');
+  assert.deepEqual(queryTransmission.tables, ['account']);
+  assert.ok(queryTransmission.columns.includes('name'));
+  assert.ok(queryTransmission.columns.includes('accountnumber'));
 });

@@ -7,6 +7,7 @@ import { MCP_TOOLS, MCP_TOOL_BY_NAME, publicTool } from './tool-catalog.js';
 import { desktopStatus, enqueueDesktopToolCall, waitForDesktopJob } from './broker.js';
 import { recordTransmission } from './analytics.js';
 import { entitlementsForUser } from '../plans/subscription-store.js';
+import { logger } from '../../core/logger.js';
 
 const LATEST_PROTOCOL = '2025-11-25';
 const SUPPORTED_PROTOCOLS = new Set([LATEST_PROTOCOL, '2025-06-18', '2025-03-26']);
@@ -14,6 +15,12 @@ const SUPPORTED_PROTOCOLS = new Set([LATEST_PROTOCOL, '2025-06-18', '2025-03-26'
 // connector grant up front so write tools do not immediately require a second
 // authorization, and request offline access so the connection can be renewed.
 const INITIAL_OAUTH_SCOPES = 'mcp:read mcp:write offline_access';
+// Keep each discovery response comfortably below hosted-client and proxy
+// payload thresholds. Command Workbench schemas are intentionally rich, so a
+// fixed item count alone is not enough to bound a page.
+const TOOL_PAGE_MAX_ITEMS = 20;
+const TOOL_PAGE_MAX_BYTES = 48 * 1024;
+const TOOL_CURSOR_PREFIX = 'qp-tools-v1:';
 
 function jsonRpcError(id, code, message, data) {
   return { jsonrpc: '2.0', id: id ?? null, error: { code, message, ...(data ? { data } : {}) } };
@@ -61,6 +68,38 @@ function resourceMetadataUrl(ctx) {
 
 function hasScope(connection, scope) {
   return !connection.oauth || connection.scopes?.includes(scope);
+}
+
+function parseToolCursor(value, total) {
+  if (value === undefined || value === null || value === '') return 0;
+  const cursor = String(value);
+  if (!cursor.startsWith(TOOL_CURSOR_PREFIX)) return -1;
+  const offset = Number(cursor.slice(TOOL_CURSOR_PREFIX.length));
+  return Number.isSafeInteger(offset) && offset >= 0 && offset < total ? offset : -1;
+}
+
+function pageTools(toolDefinitions, cursor) {
+  const start = parseToolCursor(cursor, toolDefinitions.length);
+  if (start < 0) return null;
+
+  const tools = [];
+  let estimatedBytes = 0;
+  for (let index = start; index < toolDefinitions.length && tools.length < TOOL_PAGE_MAX_ITEMS; index += 1) {
+    const exposed = publicTool(toolDefinitions[index]);
+    const toolBytes = Buffer.byteLength(JSON.stringify(exposed));
+    // Always return at least one tool, even if a future individual descriptor
+    // is larger than the normal page budget.
+    if (tools.length && estimatedBytes + toolBytes > TOOL_PAGE_MAX_BYTES) break;
+    tools.push(exposed);
+    estimatedBytes += toolBytes;
+  }
+
+  const nextOffset = start + tools.length;
+  return {
+    tools,
+    ...(nextOffset < toolDefinitions.length ? { nextCursor: `${TOOL_CURSOR_PREFIX}${nextOffset}` } : {}),
+    estimatedBytes
+  };
 }
 
 function validateSchema(schema, value, path = 'arguments', errors = []) {
@@ -186,6 +225,11 @@ export async function handleMcpRequest(ctx, { scopedToolName } = {}) {
   if (body.method === 'initialize') {
     const requested = String(body.params?.protocolVersion || LATEST_PROTOCOL);
     if (!SUPPORTED_PROTOCOLS.has(requested)) return sendMcpJson(ctx, 200, jsonRpcError(body.id, -32602, `Unsupported MCP protocol version ${requested}.`));
+    logger.info('MCP client initialized.', {
+      protocolVersion: requested,
+      clientName: String(body.params?.clientInfo?.name || 'unknown').slice(0, 80),
+      requestIdHeader: ctx.requestId
+    });
     return sendMcpJson(ctx, 200, { jsonrpc: '2.0', id: body.id, result: {
       protocolVersion: requested,
       capabilities: { tools: { listChanged: false }, resources: { subscribe: false, listChanged: false } },
@@ -201,8 +245,17 @@ export async function handleMcpRequest(ctx, { scopedToolName } = {}) {
         'WWW-Authenticate': `Bearer resource_metadata="${resourceMetadataUrl(ctx)}", error="insufficient_scope", scope="${INITIAL_OAUTH_SCOPES}"`
       });
     }
-    const tools = scopedToolName ? MCP_TOOLS.filter(item => item.name === scopedToolName) : MCP_TOOLS;
-    return sendMcpJson(ctx, 200, { jsonrpc: '2.0', id: body.id, result: { tools: tools.map(publicTool) } });
+    const definitions = scopedToolName ? MCP_TOOLS.filter(item => item.name === scopedToolName) : MCP_TOOLS;
+    const page = pageTools(definitions, body.params?.cursor);
+    if (!page) return sendMcpJson(ctx, 200, jsonRpcError(body.id, -32602, 'The tools/list cursor is invalid or expired.'));
+    logger.info('MCP tool catalog page listed.', {
+      count: page.tools.length,
+      nextPage: Boolean(page.nextCursor),
+      estimatedBytes: page.estimatedBytes,
+      requestIdHeader: ctx.requestId
+    });
+    const { estimatedBytes, ...result } = page;
+    return sendMcpJson(ctx, 200, { jsonrpc: '2.0', id: body.id, result });
   }
   if (body.method === 'resources/list') {
     if (!hasScope(connection, 'mcp:read')) return sendMcpJson(ctx, 403, jsonRpcError(body.id, -32003, 'The access token needs mcp:read scope.'));

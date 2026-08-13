@@ -19,6 +19,9 @@ function prune(document) {
 
 export async function enqueueDesktopToolCall({ connection, tool, arguments: args, requestId }) {
   const now = new Date().toISOString();
+  const submittedArguments = { ...(args || {}) };
+  const envelopedArguments = tool.argumentEnvelope && submittedArguments[tool.argumentEnvelope];
+  if (tool.argumentEnvelope) delete submittedArguments[tool.argumentEnvelope];
   const job = {
     id: randomId('job'),
     requestId,
@@ -29,7 +32,13 @@ export async function enqueueDesktopToolCall({ connection, tool, arguments: args
     toolName: tool.name,
     action: tool.action,
     risk: tool.risk,
-    arguments: { ...(tool.fixedArguments || {}), ...(args || {}) },
+    arguments: {
+      ...(tool.fixedArguments || {}),
+      ...submittedArguments,
+      ...(envelopedArguments && typeof envelopedArguments === 'object' && !Array.isArray(envelopedArguments)
+        ? envelopedArguments
+        : {})
+    },
     status: 'queued',
     createdAt: now,
     expiresAt: new Date(Date.now() + tool.timeoutMs).toISOString(),

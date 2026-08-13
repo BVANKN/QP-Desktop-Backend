@@ -46,8 +46,18 @@ test('rule and action schemas expose discoverable parameters to MCP clients', ()
   const create = MCP_TOOL_BY_NAME.get('create_command_bar_control');
   const command = create.inputSchema.properties.command;
   assert.deepEqual(command.properties.surface.enum, ['mainGrid', 'mainForm', 'subgrid', 'associated']);
-  assert.deepEqual(command.properties.controlType.enum, ['button', 'dropdown', 'split']);
   assert.ok(command.properties.action.properties.parameters.items.properties.value.description.includes('PrimaryControl'));
-  assert.ok(command.properties.enableRules.items.properties.type.enum.includes('CustomRule'));
-  assert.ok(command.properties.displayRules.maxItems <= 32);
+  assert.match(command.description, /displayRules/);
+
+  const rules = MCP_TOOL_BY_NAME.get('replace_command_bar_rules').inputSchema.properties.displayRules;
+  assert.ok(rules.items.properties.type.enum.includes('CustomRule'));
+  assert.ok(rules.maxItems <= 32);
+});
+
+test('tool discovery metadata remains within its regression budget', () => {
+  const advertised = MCP_TOOLS.map(publicTool);
+  const totalBytes = Buffer.byteLength(JSON.stringify({ tools: advertised }));
+  const largest = Math.max(...advertised.map(item => Buffer.byteLength(JSON.stringify(item))));
+  assert.ok(totalBytes < 80 * 1024, `MCP catalog regressed to ${totalBytes} bytes.`);
+  assert.ok(largest < 8 * 1024, `An individual MCP tool descriptor regressed to ${largest} bytes.`);
 });
