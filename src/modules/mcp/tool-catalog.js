@@ -3,6 +3,7 @@
 const string = description => ({ type: 'string', description });
 const boolean = description => ({ type: 'boolean', description });
 const number = (description, extra = {}) => ({ type: 'number', description, ...extra });
+const array = (items, description, extra = {}) => ({ type: 'array', items, description, ...extra });
 const object = (properties = {}, required = []) => ({
   type: 'object',
   properties,
@@ -35,6 +36,83 @@ const columnName = string('Dataverse column logical name.');
 const recordId = string('Dataverse record GUID.');
 const confirm = boolean('Must be true after the user explicitly approves this destructive operation.');
 const arbitraryPayload = { type: 'object', description: 'Dataverse values keyed by logical column name.', additionalProperties: true };
+const commandSurface = { type: 'string', enum: ['mainGrid', 'mainForm', 'subgrid', 'associated'], description: 'Supported model-driven app command-bar surface.' };
+const commandParameter = object({
+  type: { type: 'string', enum: ['CrmParameter', 'StringParameter', 'BoolParameter', 'IntParameter', 'DecimalParameter'], description: 'Ribbon command parameter element type.' },
+  name: string('Parameter name. Required for URL parameters.'),
+  value: { description: 'Parameter value. CrmParameter values include PrimaryControl, SelectedControl, SelectedControlSelectedItemIds, and PrimaryEntityTypeName.' }
+}, ['type', 'value']);
+const commandAction = object({
+  type: { type: 'string', enum: ['javascript', 'url'], description: 'Command action type.' },
+  library: string('JavaScript web resource name, for example $webresource:new_/commands.js.'),
+  functionName: string('JavaScript function to invoke.'),
+  url: string('Absolute HTTPS URL for a URL action.'),
+  parameters: array(commandParameter, 'Ordered action parameters.', { maxItems: 24 })
+}, ['type']);
+const commandRule = object({
+  id: string('Optional stable rule identifier. Omit to generate one.'),
+  type: { type: 'string', enum: ['EntityRule', 'FormStateRule', 'FormTypeRule', 'SelectionCountRule', 'ValueRule', 'EntityPrivilegeRule', 'RecordPrivilegeRule', 'EntityPropertyRule', 'OrganizationSettingRule', 'CustomRule'], description: 'Supported classic rule condition.' },
+  entityName: tableName,
+  context: string('EntityRule context.'),
+  appliesTo: string('Rule target such as SelectedEntity.'),
+  state: string('Form state such as Existing or Create.'),
+  formType: string('Form type such as Main.'),
+  minimum: number('Minimum selected rows.'),
+  maximum: number('Maximum selected rows.'),
+  field: columnName,
+  value: { description: 'Expected ValueRule value.' },
+  privilegeType: string('Privilege such as Read, Write, Create, or Delete.'),
+  privilegeDepth: string('Privilege depth such as Basic, Local, Deep, or Global.'),
+  propertyName: string('Entity property name.'),
+  propertyValue: { description: 'Expected entity property value.' },
+  setting: string('Organization setting name.'),
+  library: string('JavaScript web resource for an enable-rule CustomRule.'),
+  functionName: string('CustomRule JavaScript function.'),
+  parameters: array(commandParameter, 'Ordered CustomRule parameters.', { maxItems: 24 }),
+  defaultValue: boolean('Default result when the rule cannot be evaluated.'),
+  invertResult: boolean('Invert the evaluated result.'),
+  attributes: { type: 'object', description: 'Advanced RibbonDiffXml attributes used when cloning an existing supported rule.', additionalProperties: true }
+}, ['type']);
+const commandDefinition = object({
+  prefix: string('Publisher prefix used in generated identifiers, for example contoso.'),
+  name: string('Unique command name used to generate stable RibbonDiffXml identifiers.'),
+  label: string('Visible command label.'),
+  description: string('Tooltip description.'),
+  surface: commandSurface,
+  sequence: number('Placement sequence, starting at 1.', { minimum: 1 }),
+  controlType: { type: 'string', enum: ['button', 'dropdown', 'split'], description: 'Control presentation.' },
+  image16: string('Optional 16x16 image reference.'),
+  image32: string('Optional 32x32 image reference.'),
+  action: commandAction,
+  displayRules: array(commandRule, 'Complete display-rule set for this command.', { maxItems: 32 }),
+  enableRules: array(commandRule, 'Complete enable-rule set for this command.', { maxItems: 32 })
+});
+const createCommandDefinition = object(commandDefinition.properties, ['name', 'label', 'surface', 'action']);
+const cloneCommandDefinition = object(commandDefinition.properties, ['name']);
+const commandChanges = object({
+  label: string('New visible label.'),
+  description: string('New tooltip description.'),
+  surface: commandSurface,
+  sequence: number('New placement sequence.', { minimum: 1 }),
+  image16: string('New 16x16 image reference; pass an empty string to remove it.'),
+  image32: string('New 32x32 image reference; pass an empty string to remove it.'),
+  action: commandAction,
+  displayRules: array(commandRule, 'Replacement display-rule set. Pass an empty array to remove all display rules.', { maxItems: 32 }),
+  enableRules: array(commandRule, 'Replacement enable-rule set. Pass an empty array to remove all enable rules.', { maxItems: 32 })
+});
+const commandChangeContext = {
+  logicalName: tableName,
+  solutionUniqueName: string('Unmanaged solution unique name that owns the command-bar customization.'),
+  controlId: string('Exact command-bar control identifier.'),
+  command: commandDefinition,
+  changes: commandChanges,
+  displayRules: array(commandRule, 'Complete replacement display-rule set.', { maxItems: 32 }),
+  enableRules: array(commandRule, 'Complete replacement enable-rule set.', { maxItems: 32 }),
+  copyRules: boolean('When cloning, copy supported display and enable rules from the source command.'),
+  surface: commandSurface,
+  includeXml: boolean('Include generated RibbonDiffXml in preview output. Leave false for smaller MCP responses.'),
+  confirm: boolean('Must be true after explicit user approval of deployment and publish.')
+};
 
 export const MCP_TOOLS = Object.freeze([
   tool('environment_overview', 'environmentInsights', 'Summarize tables, flows, solutions, applications, security, and governance signals in the connected environment.'),
@@ -129,6 +207,77 @@ export const MCP_TOOLS = Object.freeze([
 
   tool('list_command_bar_targets', 'ribbonTargets', 'List tables and applications with command bar/ribbon customizations.'),
   tool('get_command_bar_definition', 'ribbonDefinition', 'Get effective command metadata and editable RibbonDiffXml for one table.', object({ logicalName: tableName, solutionUniqueName: string('Optional unmanaged solution unique name used to load editable RibbonDiffXml.') }, ['logicalName'])),
+  tool('list_command_bar_controls', 'ribbonCommandCatalog', 'List classic and modern commands for a table with labels, surfaces, actions, rules, hidden state, app scope, and safe editing capabilities. Results are bounded; filter by surface or search text for large ribbons.', object({
+    logicalName: tableName,
+    solutionUniqueName: string('Optional unmanaged solution unique name. Supply it to identify controls editable in that solution layer.'),
+    surface: { type: 'string', enum: ['all', 'mainGrid', 'mainForm', 'subgrid', 'associated', 'quickForm', 'globalHeader', 'dashboard', 'other'], description: 'Command surface filter.' },
+    source: { type: 'string', enum: ['all', 'modern', 'unmanaged-draft', 'inherited-classic'], description: 'Customization source filter.' },
+    appModuleId: string('Optional model-driven app GUID for modern app actions.'),
+    search: string('Search labels, identifiers, descriptions, commands, and surfaces.'),
+    limit: number('Maximum controls returned, from 1 to 500.', { minimum: 1, maximum: 500 })
+  }, ['logicalName'])),
+  tool('get_command_bar_control', 'ribbonCommandCatalog', 'Get one command-bar control with its action parameters, display rules, enable rules, surface, source, and supported editing operations.', object({
+    logicalName: tableName,
+    solutionUniqueName: string('Optional unmanaged solution unique name.'),
+    controlId: string('Exact control identifier returned by list_command_bar_controls.'),
+    surface: { type: 'string', enum: ['all', 'mainGrid', 'mainForm', 'subgrid', 'associated', 'quickForm', 'globalHeader', 'dashboard', 'other'], description: 'Optional surface disambiguation.' }
+  }, ['logicalName', 'controlId']), { fixedArguments: { detail: true, limit: 10 } }),
+  tool('preview_command_bar_change', 'previewRibbonCommandChange', 'Compile and validate a semantic classic command-bar change without importing or publishing it. Always preview before a live command-bar mutation.', object({
+    ...commandChangeContext,
+    operation: { type: 'string', enum: ['create', 'clone', 'update', 'rules', 'hide', 'unhide', 'delete'], description: 'Change to preview.' }
+  }, ['logicalName', 'solutionUniqueName', 'operation'])),
+  tool('create_command_bar_control', 'applyRibbonCommandChange', 'Create and publish a classic button, dropdown, or split button on a main grid, main form, subgrid, or associated view in an unmanaged solution. Deployment has automatic recovery and returns a rollback token.', object({
+    logicalName: commandChangeContext.logicalName,
+    solutionUniqueName: commandChangeContext.solutionUniqueName,
+    command: createCommandDefinition,
+    confirm: commandChangeContext.confirm
+  }, ['logicalName', 'solutionUniqueName', 'command', 'confirm']), { readOnly: false, fixedArguments: { operation: 'create' }, timeoutMs: 120_000 }),
+  tool('clone_command_bar_control', 'applyRibbonCommandChange', 'Clone a supported inherited classic command into an editable unmanaged command without overwriting the original. Unsupported compound rules or action types are rejected rather than changed silently.', object({
+    logicalName: commandChangeContext.logicalName,
+    solutionUniqueName: commandChangeContext.solutionUniqueName,
+    controlId: commandChangeContext.controlId,
+    surface: commandChangeContext.surface,
+    command: cloneCommandDefinition,
+    copyRules: commandChangeContext.copyRules,
+    confirm: commandChangeContext.confirm
+  }, ['logicalName', 'solutionUniqueName', 'controlId', 'command', 'confirm']), { readOnly: false, fixedArguments: { operation: 'clone' }, timeoutMs: 120_000 }),
+  tool('update_command_bar_control', 'applyRibbonCommandChange', 'Update the placement, label, tooltip, images, action, or rules of a classic control owned by the selected unmanaged solution. Rule arrays replace the complete rule set when supplied.', object({
+    logicalName: commandChangeContext.logicalName,
+    solutionUniqueName: commandChangeContext.solutionUniqueName,
+    controlId: commandChangeContext.controlId,
+    changes: commandChanges,
+    confirm: commandChangeContext.confirm
+  }, ['logicalName', 'solutionUniqueName', 'controlId', 'changes', 'confirm']), { readOnly: false, idempotent: true, fixedArguments: { operation: 'update' }, timeoutMs: 120_000 }),
+  tool('replace_command_bar_rules', 'applyRibbonCommandChange', 'Replace or remove display and enable rules of a classic control owned by the selected unmanaged solution. Supplied arrays replace that complete rule set; pass an empty array to remove it, and omit the other set to preserve it.', object({
+    logicalName: commandChangeContext.logicalName,
+    solutionUniqueName: commandChangeContext.solutionUniqueName,
+    controlId: commandChangeContext.controlId,
+    displayRules: commandChangeContext.displayRules,
+    enableRules: commandChangeContext.enableRules,
+    confirm: commandChangeContext.confirm
+  }, ['logicalName', 'solutionUniqueName', 'controlId', 'confirm']), { readOnly: false, idempotent: true, fixedArguments: { operation: 'rules' }, timeoutMs: 120_000 }),
+  tool('hide_command_bar_control', 'applyRibbonCommandChange', 'Hide an inherited or custom classic command-bar control by adding a HideCustomAction to the selected unmanaged solution.', object({
+    logicalName: commandChangeContext.logicalName,
+    solutionUniqueName: commandChangeContext.solutionUniqueName,
+    controlId: commandChangeContext.controlId,
+    confirm: commandChangeContext.confirm
+  }, ['logicalName', 'solutionUniqueName', 'controlId', 'confirm']), { readOnly: false, idempotent: true, fixedArguments: { operation: 'hide' }, timeoutMs: 120_000 }),
+  tool('unhide_command_bar_control', 'applyRibbonCommandChange', 'Remove this solution layer’s HideCustomAction for a classic command-bar control.', object({
+    logicalName: commandChangeContext.logicalName,
+    solutionUniqueName: commandChangeContext.solutionUniqueName,
+    controlId: commandChangeContext.controlId,
+    confirm: commandChangeContext.confirm
+  }, ['logicalName', 'solutionUniqueName', 'controlId', 'confirm']), { readOnly: false, idempotent: true, fixedArguments: { operation: 'unhide' }, timeoutMs: 120_000 }),
+  tool('delete_custom_command_bar_control', 'deleteRibbonCommand', 'Permanently remove a CustomAction owned by the selected unmanaged solution and clean up its unreferenced command, rules, and labels. Inherited commands cannot be deleted; hide them instead.', object({
+    logicalName: commandChangeContext.logicalName,
+    solutionUniqueName: commandChangeContext.solutionUniqueName,
+    controlId: commandChangeContext.controlId,
+    confirm: commandChangeContext.confirm
+  }, ['logicalName', 'solutionUniqueName', 'controlId', 'confirm']), { readOnly: false, destructive: true, fixedArguments: { operation: 'delete' }, timeoutMs: 120_000 }),
+  tool('rollback_command_bar_deployment', 'rollbackRibbonCommandChange', 'Restore and publish the pre-deployment solution backup using the rollback token returned by a command-bar write. Tokens expire after four hours and when the desktop session ends.', object({
+    rollbackToken: string('Rollback token returned by a command-bar deployment.'),
+    confirm: boolean('Must be true after explicit user approval to restore the previous command bar.')
+  }, ['rollbackToken', 'confirm']), { readOnly: false, destructive: true, timeoutMs: 120_000 }),
   tool('deploy_command_bar_definition', 'deployRibbonDiff', 'Validate and deploy table RibbonDiffXml through Quicker Portal Command Workbench with rollback support.', object({ logicalName: tableName, metadataId: string('Table metadata GUID returned by list_command_bar_targets.'), ribbonDiffXml: string('Complete RibbonDiffXml payload.'), solutionUniqueName: string('Unmanaged solution unique name.'), confirm: boolean('Confirm deploying and publishing command bar customization.') }, ['logicalName', 'metadataId', 'ribbonDiffXml', 'solutionUniqueName', 'confirm']), { readOnly: false, timeoutMs: 120_000 }),
 
   tool('open_cloud_flow', 'openPowerAutomateFlow', 'Open a cloud flow in the restricted Quicker Portal browser on the connected desktop.', object({ workflowId: string('Cloud flow workflow GUID.'), flowUrl: string('Optional known flow URL.') }, ['workflowId']), { readOnly: false }),
