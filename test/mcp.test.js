@@ -126,7 +126,39 @@ test('ChatGPT-compatible OAuth discovery, DCR, PKCE, refresh rotation, and MCP a
   const html = await authorizePage.text();
   const requestId = html.match(/name="requestId" value="([^"]+)"/)?.[1];
   const csrf = html.match(/name="csrf" value="([^"]+)"/)?.[1];
-  assert.ok(requestId && csrf, 'Authorization page did not include a protected transaction.');
+  const retryPath = html.match(/name="retryPath" value="([^"]+)"/)?.[1]?.replaceAll('&amp;', '&');
+  assert.ok(requestId && csrf && retryPath, 'Authorization page did not include a protected recoverable transaction.');
+
+  const wrongLogin = await fetch(`${server.baseUrl}/oauth/authorize`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    redirect: 'manual',
+    body: new URLSearchParams({
+      requestId,
+      csrf,
+      retryPath,
+      decision: 'approve',
+      identifier: 'mcpoauth',
+      password: 'wrong-password',
+      connectionId: connection.connection.id
+    })
+  });
+  const wrongLoginHtml = await wrongLogin.text();
+  assert.equal(wrongLogin.status, 401);
+  assert.match(wrongLoginHtml, /Invalid user name or password/);
+  assert.doesNotMatch(wrongLoginHtml, /authorization request expired/i);
+
+  const recovered = await fetch(`${server.baseUrl}/oauth/authorize`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    redirect: 'manual',
+    body: new URLSearchParams({ requestId: 'missing-request', csrf, retryPath, decision: 'approve' })
+  });
+  assert.equal(recovered.status, 303);
+  assert.match(recovered.headers.get('location') || '', /^\/oauth\/authorize\?.*qp_retry=1/);
+  const recoveredPage = await fetch(`${server.baseUrl}${recovered.headers.get('location')}`);
+  assert.equal(recoveredPage.status, 200);
+  assert.match(await recoveredPage.text(), /previous sign-in request was refreshed/i);
 
   const approval = await fetch(`${server.baseUrl}/oauth/authorize`, {
     method: 'POST',
@@ -135,6 +167,7 @@ test('ChatGPT-compatible OAuth discovery, DCR, PKCE, refresh rotation, and MCP a
     body: new URLSearchParams({
       requestId,
       csrf,
+      retryPath,
       decision: 'approve',
       identifier: 'mcpoauth',
       password: VALID_PASSWORD,

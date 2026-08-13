@@ -79,3 +79,18 @@ export function publicUser(user) {
     createdAt: user.createdAt
   };
 }
+
+/**
+ * How many accounts the store currently holds.
+ *
+ * Exposed so a deployment can answer "did my data survive the last restart?"
+ * without anyone having to guess. Every account, session, signing key, and MCP
+ * connection lives in JSON files under the configured data directory: on a
+ * host with an ephemeral filesystem and no mounted disk they are all destroyed
+ * on each deploy or wake-from-idle, and the only visible symptom is that
+ * yesterday's credentials stop working.
+ */
+export async function accountCount() {
+  const db = await usersStore.read();
+  return Object.keys(db.users || {}).length;
+}

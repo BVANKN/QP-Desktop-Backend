@@ -168,7 +168,7 @@ Every value has a safe default; override with environment variables.
 |---|---|---|
 | `QP_BACKEND_HOST` | `127.0.0.1` | Bind address |
 | `QP_BACKEND_PORT` | `4817` | Port |
-| `QP_BACKEND_DATA_DIR` | `./data` | State directory |
+| `QP_BACKEND_DATA_DIR` | `./data` | State directory. **Must point at a mounted disk on any managed host** — see the deployment section. |
 | `QP_BACKEND_ALLOWED_ORIGINS` | localhost:5817 | CORS allow-list |
 | `QP_BACKEND_TRUST_PROXY` | unset | Set to `1` only behind a trusted proxy |
 | `QP_ACCESS_TOKEN_TTL_SECONDS` | `900` | Access token lifetime |
@@ -181,7 +181,7 @@ Every value has a safe default; override with environment variables.
 | `QP_MCP_PUBLIC_BASE_URL` | request origin | Public HTTPS base used in generated MCP endpoints |
 | `QP_MCP_MAX_PAYLOAD_BYTES` | `10485760` | Maximum desktop result/request payload |
 | `QP_MCP_DESKTOP_TIMEOUT_MS` | `55000` | Maximum wait for desktop execution |
-| `QP_MCP_OAUTH_AUTHORIZATION_TTL_SECONDS` | `600` | Pending sign-in/consent lifetime |
+| `QP_MCP_OAUTH_AUTHORIZATION_TTL_SECONDS` | `1200` | Pending sign-in/consent lifetime; an expired temporary request is safely rebuilt |
 | `QP_MCP_OAUTH_CODE_TTL_SECONDS` | `300` | One-time authorization-code lifetime |
 | `QP_MCP_OAUTH_ACCESS_TTL_SECONDS` | `900` | Resource-bound MCP access-token lifetime |
 | `QP_MCP_OAUTH_REFRESH_TTL_SECONDS` | `2592000` | Rotating refresh-token lifetime |
@@ -217,6 +217,63 @@ The default `outbox` transport writes each message as a `.eml` file under
 ```bash
 grep -h "code is" data/outbox/*.eml | tail -1
 ```
+
+## Deployment: the data directory must be a real disk
+
+**This is the single most important thing about running this service.**
+
+Every user record, password hash, refresh session, token signing key, and MCP
+connection is a JSON file under `QP_BACKEND_DATA_DIR`. Managed hosts (Render,
+Heroku, Cloud Run, App Service, Fly) give a container an *ephemeral*
+filesystem: it is recreated on every deploy, every restart, and every wake from
+idle. `data/` is deliberately gitignored, so a deploy never carries state with
+it either.
+
+Without a mounted disk the result is total, silent data loss:
+
+- Signup succeeds, and the account works for as long as the instance stays up.
+- The instance restarts, redeploys, or idles out.
+- The same credentials are now rejected — the account no longer exists.
+- MCP OAuth stops authorizing, because both the connection records and the
+  signing keys that validate its tokens went with it.
+
+Nothing in the API surface looks wrong while this happens, which is what makes
+it expensive to diagnose. So the service now says it plainly:
+
+```bash
+curl https://your-host/api/health
+```
+
+```json
+{
+  "ok": true,
+  "storage": {
+    "persistent": false,
+    "accounts": "present",
+    "warning": "Accounts are stored on an ephemeral filesystem and will be lost on the next restart. Mount a disk and set QP_BACKEND_DATA_DIR to it."
+  }
+}
+```
+
+`"persistent": false` means the next restart wipes every account. The same
+condition is logged at `error` level on boot.
+
+`render.yaml` in this repository declares the disk and points
+`QP_BACKEND_DATA_DIR` at its mount:
+
+```yaml
+disk:
+  name: qp-backend-data
+  mountPath: /var/data
+  sizeGB: 1
+envVars:
+  - key: QP_BACKEND_DATA_DIR
+    value: /var/data
+```
+
+Mounting a disk on Render requires a paid instance type. On a free instance the
+service loses its data on every spin-down regardless of configuration — there
+is no setting that avoids this, only a database or a disk.
 
 ## Production notes
 

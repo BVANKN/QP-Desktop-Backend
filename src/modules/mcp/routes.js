@@ -9,6 +9,7 @@ import { handleMcpRequest } from './protocol.js';
 import { entitlementsForUser } from '../plans/subscription-store.js';
 import { ForbiddenError } from '../../core/errors.js';
 import { consumeRateLimit } from '../../core/middleware/rate-limit.js';
+import { logger } from '../../core/logger.js';
 import {
   OAuthError,
   authorizationServerMetadata,
@@ -55,6 +56,22 @@ function sendAuthorizationErrorPage(ctx, error) {
   sendHtml(ctx, error?.status || 400, `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Authorization failed</title><style>body{font:14px "Segoe UI",sans-serif;background:#f5f5f5;color:#242424;display:grid;place-items:center;min-height:100vh;margin:0}.card{max-width:540px;background:#fff;border:1px solid #ddd;padding:28px;box-shadow:0 8px 28px #0002}h1{font-size:22px;font-weight:600;color:#a4262c}p{line-height:1.5}</style></head><body><main class="card"><h1>Authorization could not be completed</h1><p>${String(message).replace(/[&<>"']/g, value => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[value])}</p><p>Return to ChatGPT and try connecting again.</p></main></body></html>`);
 }
 
+function safeAuthorizationRetryPath(value) {
+  const path = String(value || '').trim();
+  if (!path.startsWith('/oauth/authorize?') || path.length > 12_000) return '';
+  try {
+    const parsed = new URL(path, 'https://quicker-portal.invalid');
+    if (parsed.origin !== 'https://quicker-portal.invalid' || parsed.pathname !== '/oauth/authorize') return '';
+    for (const required of ['response_type', 'client_id', 'redirect_uri', 'code_challenge', 'code_challenge_method', 'resource']) {
+      if (!parsed.searchParams.get(required)) return '';
+    }
+    parsed.searchParams.set('qp_retry', '1');
+    return `${parsed.pathname}?${parsed.searchParams.toString()}`;
+  } catch {
+    return '';
+  }
+}
+
 export function registerMcpRoutes(router) {
   router.get('/.well-known/oauth-protected-resource', ctx => {
     sendJson(ctx, 200, mcpResourceMetadata(`${endpointBase(ctx)}/mcp`, endpointBase(ctx)));
@@ -85,7 +102,11 @@ export function registerMcpRoutes(router) {
         ip: ctx.ip,
         userAgent: ctx.req.headers['user-agent']
       });
-      sendHtml(ctx, 200, renderAuthorizationPage(model));
+      sendHtml(ctx, 200, renderAuthorizationPage(model, {
+        notice: ctx.url.searchParams.get('qp_retry') === '1'
+          ? 'The previous sign-in request was refreshed. Please authorize again.'
+          : ''
+      }));
     } catch (error) {
       sendAuthorizationErrorPage(ctx, error);
     }
@@ -95,6 +116,7 @@ export function registerMcpRoutes(router) {
     const form = await readFormBody(ctx);
     const requestId = form.get('requestId') || '';
     const csrf = form.get('csrf') || '';
+    const retryPath = safeAuthorizationRetryPath(form.get('retryPath'));
     try {
       const redirect = await completeAuthorization({
         requestId,
@@ -106,6 +128,14 @@ export function registerMcpRoutes(router) {
       }, { ip: ctx.ip, userAgent: ctx.req.headers['user-agent'] });
       sendRedirect(ctx, redirect);
     } catch (error) {
+      if (retryPath && ['authorization_missing', 'authorization_expired'].includes(error?.reason)) {
+        logger.warn('MCP OAuth authorization transaction was refreshed.', {
+          requestId,
+          reason: error.reason,
+          requestIdHeader: ctx.requestId
+        });
+        return sendRedirect(ctx, retryPath, 303);
+      }
       try {
         const model = await resumeAuthorization(requestId, csrf);
         sendHtml(ctx, error?.status || 400, renderAuthorizationPage(model, { error: error.message }));

@@ -21,6 +21,20 @@ function boolEnv(name, fallback) {
   return raw === '1' || raw.toLowerCase() === 'true';
 }
 
+/**
+ * Whether state written to the data directory survives a restart.
+ *
+ * An explicitly configured data directory is taken as the operator having
+ * pointed it at real storage — a mounted disk, a volume, a host path. Without
+ * one, on a host that advertises itself as managed, the container filesystem
+ * is all there is, and it is recreated on every deploy and every wake from
+ * idle. Exported as a plain function so the rule itself can be asserted rather
+ * than inferred from whichever environment the tests happen to run in.
+ */
+export function isPersistentStorage({ dataDirConfigured, managedHost }) {
+  return Boolean(dataDirConfigured) || !managedHost;
+}
+
 export const config = Object.freeze({
   env: process.env.NODE_ENV || 'development',
   host: process.env.QP_BACKEND_HOST || '127.0.0.1',
@@ -29,6 +43,32 @@ export const config = Object.freeze({
   // Filesystem layout. dataDir holds all persistent state and is created with
   // owner-only permissions on boot.
   dataDir: process.env.QP_BACKEND_DATA_DIR || path.join(backendRoot, 'data'),
+
+  // Whether the state written to dataDir actually survives a restart.
+  //
+  // Every account, password hash, refresh session, token signing key, and MCP
+  // connection is a JSON file under dataDir. On a managed host the container
+  // filesystem is recreated on each deploy, restart, and wake from idle, so
+  // without a mounted disk all of it is destroyed — and the only symptom is
+  // that credentials which worked an hour ago are suddenly rejected, with a
+  // perfectly healthy-looking service behind them.
+  //
+  // An explicitly configured dataDir is taken as the operator having pointed
+  // it at a real volume. Without one, on a host that advertises itself as
+  // managed, the storage is ephemeral and the service says so loudly.
+  storage: Object.freeze({
+    dataDirConfigured: Boolean(process.env.QP_BACKEND_DATA_DIR),
+    managedHost: Boolean(
+      process.env.RENDER ||
+      process.env.DYNO ||
+      process.env.K_SERVICE ||
+      process.env.WEBSITE_INSTANCE_ID ||
+      process.env.FLY_APP_NAME
+    ),
+    get persistent() {
+      return isPersistentStorage(this);
+    }
+  }),
 
   // Origins allowed to call this API from a browser context. The Electron
   // main process talks to us server-to-server (no Origin header), so this
@@ -48,7 +88,7 @@ export const config = Object.freeze({
     maxPayloadBytes: intEnv('QP_MCP_MAX_PAYLOAD_BYTES', 10 * 1024 * 1024),
     desktopTimeoutMs: intEnv('QP_MCP_DESKTOP_TIMEOUT_MS', 55_000),
     oauth: Object.freeze({
-      authorizationTtlSeconds: intEnv('QP_MCP_OAUTH_AUTHORIZATION_TTL_SECONDS', 10 * 60),
+      authorizationTtlSeconds: intEnv('QP_MCP_OAUTH_AUTHORIZATION_TTL_SECONDS', 20 * 60),
       codeTtlSeconds: intEnv('QP_MCP_OAUTH_CODE_TTL_SECONDS', 5 * 60),
       accessTtlSeconds: intEnv('QP_MCP_OAUTH_ACCESS_TTL_SECONDS', 15 * 60),
       refreshTtlSeconds: intEnv('QP_MCP_OAUTH_REFRESH_TTL_SECONDS', 30 * 24 * 60 * 60),

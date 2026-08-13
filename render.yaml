@@ -1,0 +1,55 @@
+# Render deployment for the Quicker Portal account service.
+#
+# THE DISK IS THE POINT OF THIS FILE.
+#
+# Every user record, password hash, refresh session, token signing key, and MCP
+# connection lives in JSON files under QP_BACKEND_DATA_DIR. A Render service
+# without a mounted disk has an ephemeral filesystem: it is recreated on every
+# deploy, every restart, and every wake from idle. Without the disk below the
+# service loses every account it has ever created, and the symptom is silent —
+# signup works, then the same credentials are rejected minutes later, and MCP
+# connections stop authorizing because their signing keys are gone too.
+#
+# `data/` is deliberately gitignored (it holds password hashes and signing
+# keys), so a deploy never carries state with it. The disk is the only thing
+# that keeps state alive between releases.
+#
+# Note: mounting a disk requires a paid instance type. On a free instance this
+# service will lose data on every spin-down no matter what else is configured.
+services:
+  - type: web
+    name: qp-desktop-backend
+    runtime: node
+    plan: starter
+    buildCommand: npm ci --omit=dev || npm install --omit=dev
+    startCommand: npm start
+    healthCheckPath: /api/health
+    disk:
+      name: qp-backend-data
+      # QP_BACKEND_DATA_DIR must point at this mount, or the service writes to
+      # the container filesystem again and the disk sits there doing nothing.
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: QP_BACKEND_DATA_DIR
+        value: /var/data
+      # Render routes external traffic to this port and terminates TLS in front
+      # of it, so binding to all interfaces here is expected.
+      - key: QP_BACKEND_HOST
+        value: 0.0.0.0
+      - key: NODE_ENV
+        value: production
+      # Set to 1 only because Render's proxy sets X-Forwarded-For. Without a
+      # trusted proxy in front, clients could spoof their rate-limit identity.
+      - key: QP_BACKEND_TRUST_PROXY
+        value: "1"
+      # The public origin used to build MCP endpoints and the OAuth issuer.
+      - key: QP_MCP_PUBLIC_BASE_URL
+        sync: false
+      # Generated once by Render and then persisted, so tokens stay valid.
+      - key: QP_BACKEND_ALLOWED_ORIGINS
+        sync: false
+      # MUST be empty in production: a fixed signup code lets anyone verify any
+      # address. See "Verification codes are currently static" in the README.
+      - key: QP_VERIFICATION_STATIC_CODE
+        value: ""

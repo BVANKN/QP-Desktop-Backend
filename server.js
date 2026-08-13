@@ -6,13 +6,23 @@ import { logger } from './src/core/logger.js';
 
 const server = createApp();
 
+// Said once, loudly, at boot. Losing every account on the next restart is not
+// something an operator should have to discover from a user who cannot sign in.
+if (!config.storage.persistent) {
+  logger.error('Account storage is EPHEMERAL — every account, session, signing key, and MCP connection will be lost on the next restart or deploy.', {
+    dataDir: config.dataDir,
+    fix: 'Mount a persistent disk and set QP_BACKEND_DATA_DIR to its mount path (see render.yaml).'
+  });
+}
+
 server.listen(config.port, config.host, () => {
   logger.info('QP-X-XRM backend listening', {
     host: config.host,
     port: config.port,
     env: config.env,
     dataDir: config.dataDir,
-    mailTransport: config.mail.transport
+    mailTransport: config.mail.transport,
+    storagePersistent: config.storage.persistent
   });
 });
 

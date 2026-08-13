@@ -27,7 +27,7 @@ import {
 } from './modules/auth/auth-service.js';
 import { publicPlanCatalog, planById, PLANS } from './modules/plans/plan-catalog.js';
 import { changePlan, entitlementsForUser } from './modules/plans/subscription-store.js';
-import { findUserById, publicUser, updateUser } from './modules/users/user-repo.js';
+import { accountCount, findUserById, publicUser, updateUser } from './modules/users/user-repo.js';
 import { issueAccessToken } from './lib/tokens.js';
 import { audit } from './modules/audit/audit.js';
 import { registerMcpRoutes } from './modules/mcp/routes.js';
@@ -37,8 +37,30 @@ export function buildRouter() {
 
   registerMcpRoutes(router);
 
-  router.get('/api/health', ctx => {
-    sendJson(ctx, 200, { ok: true, service: 'qp-x-xrm-backend', time: new Date().toISOString() });
+  router.get('/api/health', async ctx => {
+    // Storage health is reported here because the failure it describes is
+    // otherwise completely silent: the service answers every request happily
+    // while the accounts behind it have been wiped. No path, no counts, and
+    // no identity data — just enough to tell "my data is gone" from "my
+    // credentials are wrong" in a single request.
+    let accounts = 'unknown';
+    try {
+      accounts = (await accountCount()) > 0 ? 'present' : 'empty';
+    } catch {
+      accounts = 'unreadable';
+    }
+    sendJson(ctx, 200, {
+      ok: true,
+      service: 'qp-x-xrm-backend',
+      time: new Date().toISOString(),
+      storage: {
+        persistent: config.storage.persistent,
+        accounts,
+        ...(config.storage.persistent ? {} : {
+          warning: 'Accounts are stored on an ephemeral filesystem and will be lost on the next restart. Mount a disk and set QP_BACKEND_DATA_DIR to it.'
+        })
+      }
+    });
   });
 
   router.get('/api/plans', ctx => {
