@@ -86,7 +86,7 @@ export const config = Object.freeze({
     // HTTP origin when TLS terminates at the hosting edge.
     publicBaseUrl: process.env.QP_MCP_PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || '',
     maxPayloadBytes: intEnv('QP_MCP_MAX_PAYLOAD_BYTES', 10 * 1024 * 1024),
-    desktopTimeoutMs: intEnv('QP_MCP_DESKTOP_TIMEOUT_MS', 55_000),
+    desktopTimeoutMs: intEnv('QP_MCP_DESKTOP_TIMEOUT_MS', 105_000),
     oauth: Object.freeze({
       authorizationTtlSeconds: intEnv('QP_MCP_OAUTH_AUTHORIZATION_TTL_SECONDS', 20 * 60),
       codeTtlSeconds: intEnv('QP_MCP_OAUTH_CODE_TTL_SECONDS', 5 * 60),

@@ -28,6 +28,7 @@ test('command-bar MCP tools are typed, uniquely named, and risk classified', () 
     assert.equal(advertised._meta['quickerportal/execution'], 'connected-desktop');
   }
   assert.equal(MCP_TOOL_BY_NAME.get('list_command_bar_controls').risk, 'read');
+  assert.ok(MCP_TOOL_BY_NAME.get('list_command_bar_controls').timeoutMs >= 90_000);
   assert.equal(MCP_TOOL_BY_NAME.get('preview_command_bar_change').risk, 'read');
   assert.equal(MCP_TOOL_BY_NAME.get('update_command_bar_control').risk, 'write');
   assert.equal(MCP_TOOL_BY_NAME.get('delete_custom_command_bar_control').risk, 'destructive');

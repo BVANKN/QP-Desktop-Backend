@@ -217,13 +217,13 @@ export const MCP_TOOLS = Object.freeze([
     appModuleId: string('Optional model-driven app GUID for modern app actions.'),
     search: string('Search labels, identifiers, descriptions, commands, and surfaces.'),
     limit: number('Maximum controls returned, from 1 to 500.', { minimum: 1, maximum: 500 })
-  }, ['logicalName'])),
+  }, ['logicalName']), { timeoutMs: 90_000 }),
   tool('get_command_bar_control', 'ribbonCommandCatalog', 'Get one command-bar control with its action parameters, display rules, enable rules, surface, source, and supported editing operations.', object({
     logicalName: tableName,
     solutionUniqueName: string('Optional unmanaged solution unique name.'),
     controlId: string('Exact control identifier returned by list_command_bar_controls.'),
     surface: { type: 'string', enum: ['all', 'mainGrid', 'mainForm', 'subgrid', 'associated', 'quickForm', 'globalHeader', 'dashboard', 'other'], description: 'Optional surface disambiguation.' }
-  }, ['logicalName', 'controlId']), { fixedArguments: { detail: true, limit: 10 } }),
+  }, ['logicalName', 'controlId']), { fixedArguments: { detail: true, limit: 10 }, timeoutMs: 90_000 }),
   tool('preview_command_bar_change', 'previewRibbonCommandChange', 'Compile and validate a semantic classic command-bar change without importing or publishing it. Always preview before a live command-bar mutation.', object({
     logicalName: commandChangeContext.logicalName,
     solutionUniqueName: commandChangeContext.solutionUniqueName,

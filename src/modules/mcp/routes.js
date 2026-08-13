@@ -229,6 +229,8 @@ export function registerMcpRoutes(router) {
       tenantId: ctx.url.searchParams.get('tenantId') || '',
       environmentId: ctx.url.searchParams.get('environmentId') || '',
       toolName: ctx.url.searchParams.get('toolName') || '',
+      transmissionId: ctx.url.searchParams.get('transmissionId') || '',
+      includePayloads: ctx.url.searchParams.get('includePayloads') === 'true',
       since: ctx.url.searchParams.get('since') || '',
       limit: ctx.url.searchParams.get('limit') || 200
     });

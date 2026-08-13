@@ -147,9 +147,15 @@ async function executeTool(ctx, connection, tool, args, id) {
 
   const desktop = desktopStatus(connection.userId, connection.tenantId, connection.environmentId);
   if (!desktop.connected) {
+    const mismatch = desktop.environmentMatches === false;
     return jsonRpcError(id, -32002, 'Quicker Portal desktop is offline.', {
-      remediation: 'Open Quicker Portal, sign in with this Quicker Portal account, and select the configured tenant/environment.',
-      lastSeenAt: desktop.lastSeenAt
+      remediation: mismatch
+        ? `The desktop is connected to ${desktop.environmentName || desktop.environmentId || 'another environment'}. Select the environment configured for this MCP connection and retry.`
+        : 'Open Quicker Portal, sign in with this Quicker Portal account, and select the configured tenant/environment.',
+      lastSeenAt: desktop.lastSeenAt,
+      environmentMatches: desktop.environmentMatches,
+      desktopEnvironmentId: desktop.environmentId || null,
+      desktopEnvironmentName: desktop.environmentName || null
     });
   }
 

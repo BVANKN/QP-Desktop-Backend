@@ -6,7 +6,7 @@ const store = new JsonStore('mcp/jobs.json', { version: 1, jobs: [] });
 const desktopHeartbeats = new Map();
 
 const JOB_RETENTION_MS = 24 * 60 * 60_000;
-const DEFAULT_LEASE_MS = 75_000;
+const DEFAULT_LEASE_MS = 125_000;
 const MAX_PENDING_JOBS_PER_USER = 50;
 
 function prune(document) {
@@ -82,7 +82,7 @@ export async function claimDesktopJobs({ userId, tenantId, environmentId, client
       job.status === 'queued' &&
       job.userId === userId &&
       job.tenantId.toLowerCase() === String(tenantId).toLowerCase() &&
-      (!job.environmentId || !environmentId || job.environmentId.toLowerCase() === String(environmentId).toLowerCase())
+      (!job.environmentId || job.environmentId.toLowerCase() === String(environmentId).toLowerCase())
     ).slice(0, Math.min(Math.max(Number(limit) || 1, 1), 5));
     for (const job of matches) {
       job.status = 'leased';
@@ -167,7 +167,15 @@ export async function waitForDesktopJob(jobId, timeoutMs) {
     }
     return {};
   });
-  throw new Error('Timed out waiting for the connected Quicker Portal desktop. Keep Quicker Portal open and connected to this tenant.');
+  const document = await store.read();
+  const timedOutJob = document.jobs.find(item => item.id === jobId);
+  const desktop = timedOutJob
+    ? desktopStatus(timedOutJob.userId, timedOutJob.tenantId, timedOutJob.environmentId)
+    : null;
+  if (desktop && desktop.environmentMatches === false) {
+    throw new Error(`The Quicker Portal desktop switched environments before this tool ran. Select ${timedOutJob.environmentId} in Quicker Portal and retry; the desktop is currently connected to ${desktop.environmentName || desktop.environmentId || 'another environment'}.`);
+  }
+  throw new Error('Timed out waiting for the connected Quicker Portal desktop. Keep Quicker Portal running and connected to this MCP connection environment, then retry.');
 }
 
 export function heartbeatDesktop({ userId, tenantId, environmentId, environmentName, clientInstanceId, appVersion }) {

@@ -80,6 +80,7 @@ export async function recordTransmission({ connection, tool, requestId, argument
   const responseSummary = summarizePayload(result);
   const entry = {
     id: requestId,
+    time: new Date().toISOString(),
     userId: connection.userId,
     tenantId: connection.tenantId,
     tenantName: connection.tenantName,
@@ -107,6 +108,8 @@ export async function recordTransmission({ connection, tool, requestId, argument
 
 export async function queryTransmissionAnalytics(userId, filters = {}) {
   const limit = Math.min(Math.max(Number(filters.limit) || 200, 1), 1000);
+  const transmissionId = String(filters.transmissionId || '').trim();
+  const includePayloads = filters.includePayloads === true || filters.includePayloads === 'true';
   const sinceMs = filters.since ? Date.parse(filters.since) : 0;
   const filePath = path.join(config.dataDir, 'mcp/transmissions.jsonl');
   try { await fsp.access(filePath); } catch (error) {
@@ -125,6 +128,7 @@ export async function queryTransmissionAnalytics(userId, filters = {}) {
       (filters.tenantId && entry.tenantId.toLowerCase() !== String(filters.tenantId).toLowerCase()) ||
       (filters.environmentId && String(entry.environmentId).toLowerCase() !== String(filters.environmentId).toLowerCase()) ||
       (filters.toolName && entry.toolName !== filters.toolName) ||
+      (transmissionId && entry.id !== transmissionId) ||
       (sinceMs && Date.parse(entry.time) < sinceMs)) continue;
     summary.totalCalls += 1;
     summary.successfulCalls += entry.status === 'completed' ? 1 : 0;
@@ -134,7 +138,7 @@ export async function queryTransmissionAnalytics(userId, filters = {}) {
     (entry.tables || []).forEach(value => summary.tables.add(value));
     (entry.columns || []).forEach(value => summary.columns.add(value));
     (entry.recordIds || []).forEach(value => summary.records.add(value));
-    selected.push(entry);
+    selected.push(includePayloads ? entry : { ...entry, request: undefined, response: undefined });
     if (selected.length > limit) selected.shift();
     const tool = byTool.get(entry.toolName) || { name: entry.toolName, calls: 0, failures: 0, requestBytes: 0, responseBytes: 0 };
     tool.calls += 1;

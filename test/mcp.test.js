@@ -28,14 +28,14 @@ async function registerUser(username, planId) {
   return verified.body;
 }
 
-async function createConnection(session) {
+async function createConnection(session, captureMode = 'metadata') {
   const created = await server.call('POST', '/api/mcp/connections', {
     name: 'Automated MCP test',
     tenantId,
     tenantName: 'Test tenant',
     environmentId,
     environmentName: 'Test environment',
-    captureMode: 'metadata'
+    captureMode
   }, { accessToken: session.accessToken });
   assert.equal(created.status, 201, JSON.stringify(created.body));
   assert.match(created.body.apiKey, /^qpmcp\.mcp_/);
@@ -398,7 +398,7 @@ test('tool validation occurs before dispatch and offline desktop state is explic
 
 test('tool calls traverse the desktop broker and become environment-scoped analytics', async () => {
   const session = await registerUser('mcpbridge', 'pro');
-  const connection = await createConnection(session);
+  const connection = await createConnection(session, 'detailed');
   const clientInstanceId = 'mcp-test-desktop';
   const heartbeat = await server.call('POST', '/api/mcp/bridge/heartbeat', {
     tenantId,
@@ -414,6 +414,10 @@ test('tool calls traverse the desktop broker and become environment-scoped analy
     arguments: { tableLogicalName: 'account', select: ['name', 'accountnumber'], top: 2 }
   });
   await new Promise(resolve => setTimeout(resolve, 40));
+  const wrongEnvironmentQuery = new URLSearchParams({ tenantId, environmentId: 'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee', clientInstanceId, limit: '1' });
+  const notLeased = await server.call('GET', `/api/mcp/bridge/jobs?${wrongEnvironmentQuery}`, undefined, { accessToken: session.accessToken });
+  assert.equal(notLeased.status, 200, JSON.stringify(notLeased.body));
+  assert.equal(notLeased.body.jobs.length, 0, 'a desktop must never claim a job for another environment');
   const query = new URLSearchParams({ tenantId, environmentId, clientInstanceId, limit: '1' });
   const leased = await server.call('GET', `/api/mcp/bridge/jobs?${query}`, undefined, { accessToken: session.accessToken });
   assert.equal(leased.status, 200, JSON.stringify(leased.body));
@@ -471,4 +475,11 @@ test('tool calls traverse the desktop broker and become environment-scoped analy
   assert.deepEqual(queryTransmission.tables, ['account']);
   assert.ok(queryTransmission.columns.includes('name'));
   assert.ok(queryTransmission.columns.includes('accountnumber'));
+  assert.equal(queryTransmission.request, undefined, 'analytics list responses should omit detailed request payloads');
+  assert.equal(queryTransmission.response, undefined, 'analytics list responses should omit detailed response payloads');
+  const detail = await server.call('GET', `/api/mcp/analytics?tenantId=${tenantId}&environmentId=${environmentId}&transmissionId=${queryTransmission.id}&includePayloads=true&limit=1`, undefined, { accessToken: session.accessToken });
+  assert.equal(detail.status, 200, JSON.stringify(detail.body));
+  assert.equal(detail.body.analytics.transmissions.length, 1);
+  assert.equal(detail.body.analytics.transmissions[0].request.tableLogicalName, 'account');
+  assert.equal(detail.body.analytics.transmissions[0].response.value[0].name, 'Acme');
 });

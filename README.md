@@ -180,7 +180,7 @@ Every value has a safe default; override with environment variables.
 | `QP_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 | `QP_MCP_PUBLIC_BASE_URL` | request origin | Public HTTPS base used in generated MCP endpoints |
 | `QP_MCP_MAX_PAYLOAD_BYTES` | `10485760` | Maximum desktop result/request payload |
-| `QP_MCP_DESKTOP_TIMEOUT_MS` | `55000` | Maximum wait for desktop execution |
+| `QP_MCP_DESKTOP_TIMEOUT_MS` | `105000` | Maximum wait for desktop execution; long metadata reads still use tool-specific limits |
 | `QP_MCP_OAUTH_AUTHORIZATION_TTL_SECONDS` | `1200` | Pending sign-in/consent lifetime; an expired temporary request is safely rebuilt |
 | `QP_MCP_OAUTH_CODE_TTL_SECONDS` | `300` | One-time authorization-code lifetime |
 | `QP_MCP_OAUTH_ACCESS_TTL_SECONDS` | `900` | Resource-bound MCP access-token lifetime |
