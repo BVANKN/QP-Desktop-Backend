@@ -10,6 +10,10 @@ import { entitlementsForUser } from '../plans/subscription-store.js';
 
 const LATEST_PROTOCOL = '2025-11-25';
 const SUPPORTED_PROTOCOLS = new Set([LATEST_PROTOCOL, '2025-06-18', '2025-03-26']);
+// ChatGPT discovers every tool after the initial connection. Request the full
+// connector grant up front so write tools do not immediately require a second
+// authorization, and request offline access so the connection can be renewed.
+const INITIAL_OAUTH_SCOPES = 'mcp:read mcp:write offline_access';
 
 function jsonRpcError(id, code, message, data) {
   return { jsonrpc: '2.0', id: id ?? null, error: { code, message, ...(data ? { data } : {}) } };
@@ -147,7 +151,7 @@ export async function handleMcpRequest(ctx, { scopedToolName } = {}) {
     }
   } catch (error) {
     return sendMcpJson(ctx, 401, jsonRpcError(null, -32001, error.message), {
-      'WWW-Authenticate': `Bearer realm="quicker-portal-mcp", resource_metadata="${resourceMetadataUrl(ctx)}", scope="mcp:read"`
+      'WWW-Authenticate': `Bearer realm="quicker-portal-mcp", resource_metadata="${resourceMetadataUrl(ctx)}", scope="${INITIAL_OAUTH_SCOPES}"`
     });
   }
 
@@ -194,7 +198,7 @@ export async function handleMcpRequest(ctx, { scopedToolName } = {}) {
   if (body.method === 'tools/list') {
     if (!hasScope(connection, 'mcp:read')) {
       return sendMcpJson(ctx, 403, jsonRpcError(body.id, -32003, 'The access token needs mcp:read scope.'), {
-        'WWW-Authenticate': `Bearer resource_metadata="${resourceMetadataUrl(ctx)}", error="insufficient_scope", scope="mcp:read"`
+        'WWW-Authenticate': `Bearer resource_metadata="${resourceMetadataUrl(ctx)}", error="insufficient_scope", scope="${INITIAL_OAUTH_SCOPES}"`
       });
     }
     const tools = scopedToolName ? MCP_TOOLS.filter(item => item.name === scopedToolName) : MCP_TOOLS;
@@ -225,7 +229,7 @@ export async function handleMcpRequest(ctx, { scopedToolName } = {}) {
     const requiredScope = tool.annotations.readOnlyHint ? 'mcp:read' : 'mcp:write';
     if (!hasScope(connection, requiredScope)) {
       return sendMcpJson(ctx, 403, jsonRpcError(body.id, -32003, `The access token needs ${requiredScope} scope.`), {
-        'WWW-Authenticate': `Bearer resource_metadata="${resourceMetadataUrl(ctx)}", error="insufficient_scope", scope="${requiredScope}"`
+        'WWW-Authenticate': `Bearer resource_metadata="${resourceMetadataUrl(ctx)}", error="insufficient_scope", scope="${INITIAL_OAUTH_SCOPES}"`
       });
     }
     const response = await executeTool(ctx, connection, tool, body.params?.arguments || {}, body.id);

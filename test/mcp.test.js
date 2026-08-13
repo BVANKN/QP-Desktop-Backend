@@ -87,7 +87,13 @@ test('ChatGPT-compatible OAuth discovery, DCR, PKCE, refresh rotation, and MCP a
 
   const unauthenticatedProbe = await server.call('GET', new URL(resource).pathname + new URL(resource).search);
   assert.equal(unauthenticatedProbe.status, 401);
-  assert.match(unauthenticatedProbe.headers.get('www-authenticate') || '', /resource_metadata="[^\"]+\.well-known\/oauth-protected-resource\/mcp\//);
+  const authChallengeHeader = unauthenticatedProbe.headers.get('www-authenticate') || '';
+  assert.match(authChallengeHeader, /resource_metadata="[^\"]+\.well-known\/oauth-protected-resource\/mcp\//);
+  assert.match(
+    authChallengeHeader,
+    /scope="mcp:read mcp:write offline_access"/,
+    'The initial connection must request every scope needed by the advertised tool catalog.'
+  );
 
   const protectedMetadata = await server.call('GET', `/.well-known/oauth-protected-resource/mcp/${encodeURIComponent(session.user.id)}/${encodeURIComponent(tenantId)}?connection_id=${encodeURIComponent(connection.connection.id)}`);
   assert.equal(protectedMetadata.status, 200, JSON.stringify(protectedMetadata.body));
@@ -218,6 +224,67 @@ test('ChatGPT-compatible OAuth discovery, DCR, PKCE, refresh rotation, and MCP a
   assert.equal(listedTools.status, 200, JSON.stringify(listedTools.body));
   assert.ok(listedTools.body.result.tools.length > 20);
   assert.ok(listedTools.body.result.tools.every(tool => tool.name && tool.description && tool.inputSchema?.type === 'object'));
+
+  // Existing connectors may have been authorized before write tools were
+  // advertised. Their reconnect challenge must request the complete durable
+  // grant, rather than mcp:write alone, or ChatGPT will reconnect repeatedly.
+  const readOnlyAuthQuery = new URLSearchParams(authQuery);
+  readOnlyAuthQuery.set('scope', 'mcp:read');
+  readOnlyAuthQuery.set('state', 'read-only-oauth-state');
+  const readOnlyPage = await fetch(`${server.baseUrl}/oauth/authorize?${readOnlyAuthQuery}`);
+  assert.equal(readOnlyPage.status, 200);
+  const readOnlyHtml = await readOnlyPage.text();
+  const readOnlyRequestId = readOnlyHtml.match(/name="requestId" value="([^"]+)"/)?.[1];
+  const readOnlyCsrf = readOnlyHtml.match(/name="csrf" value="([^"]+)"/)?.[1];
+  const readOnlyRetryPath = readOnlyHtml.match(/name="retryPath" value="([^"]+)"/)?.[1]?.replaceAll('&amp;', '&');
+  assert.ok(readOnlyRequestId && readOnlyCsrf && readOnlyRetryPath);
+
+  const readOnlyApproval = await fetch(`${server.baseUrl}/oauth/authorize`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    redirect: 'manual',
+    body: new URLSearchParams({
+      requestId: readOnlyRequestId,
+      csrf: readOnlyCsrf,
+      retryPath: readOnlyRetryPath,
+      decision: 'approve',
+      identifier: 'mcpoauth',
+      password: VALID_PASSWORD,
+      connectionId: connection.connection.id
+    })
+  });
+  assert.equal(readOnlyApproval.status, 303, await readOnlyApproval.text());
+  const readOnlyCode = new URL(readOnlyApproval.headers.get('location')).searchParams.get('code');
+  assert.ok(readOnlyCode);
+
+  const readOnlyTokenResponse = await fetch(`${server.baseUrl}/oauth/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'authorization_code',
+      client_id: registered.body.client_id,
+      redirect_uri: callback,
+      code: readOnlyCode,
+      code_verifier: verifier,
+      resource
+    })
+  });
+  const readOnlyTokens = await readOnlyTokenResponse.json();
+  assert.equal(readOnlyTokenResponse.status, 200, JSON.stringify(readOnlyTokens));
+  assert.equal(readOnlyTokens.refresh_token, undefined, 'Read-only authorization must not silently gain offline access.');
+
+  const writeWithReadOnlyGrant = await server.call('POST', new URL(resource).pathname + new URL(resource).search, {
+    jsonrpc: '2.0',
+    id: 22,
+    method: 'tools/call',
+    params: { name: 'add_web_resource_to_form', arguments: {} }
+  }, { headers: { Authorization: `Bearer ${readOnlyTokens.access_token}`, 'MCP-Protocol-Version': '2025-11-25' } });
+  assert.equal(writeWithReadOnlyGrant.status, 403, JSON.stringify(writeWithReadOnlyGrant.body));
+  assert.match(
+    writeWithReadOnlyGrant.headers.get('www-authenticate') || '',
+    /scope="mcp:read mcp:write offline_access"/,
+    'Reconnect must upgrade an old read-only connector to the full durable grant.'
+  );
 
   const wrongAudience = await server.call('POST', new URL(resource).pathname, {
     jsonrpc: '2.0',
