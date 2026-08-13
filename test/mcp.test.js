@@ -123,6 +123,9 @@ test('ChatGPT-compatible OAuth discovery, DCR, PKCE, refresh rotation, and MCP a
   });
   const authorizePage = await fetch(`${server.baseUrl}/oauth/authorize?${authQuery}`);
   assert.equal(authorizePage.status, 200);
+  const authorizationCsp = authorizePage.headers.get('content-security-policy') || '';
+  assert.match(authorizationCsp, /form-action 'self' https:\/\/chatgpt\.com/);
+  assert.doesNotMatch(authorizationCsp, /form-action \*/);
   const html = await authorizePage.text();
   const requestId = html.match(/name="requestId" value="([^"]+)"/)?.[1];
   const csrf = html.match(/name="csrf" value="([^"]+)"/)?.[1];
@@ -174,7 +177,7 @@ test('ChatGPT-compatible OAuth discovery, DCR, PKCE, refresh rotation, and MCP a
       connectionId: connection.connection.id
     })
   });
-  assert.equal(approval.status, 302, await approval.text());
+  assert.equal(approval.status, 303, await approval.text());
   const callbackUrl = new URL(approval.headers.get('location'));
   assert.equal(callbackUrl.searchParams.get('state'), 'oauth-state-test');
   const code = callbackUrl.searchParams.get('code');
@@ -206,9 +209,19 @@ test('ChatGPT-compatible OAuth discovery, DCR, PKCE, refresh rotation, and MCP a
   assert.equal(initialized.status, 200, JSON.stringify(initialized.body));
   assert.equal(initialized.body.result.protocolVersion, '2025-11-25');
 
-  const wrongAudience = await server.call('POST', new URL(resource).pathname, {
+  const listedTools = await server.call('POST', new URL(resource).pathname + new URL(resource).search, {
     jsonrpc: '2.0',
     id: 2,
+    method: 'tools/list',
+    params: {}
+  }, { headers: { Authorization: `Bearer ${tokens.access_token}`, 'MCP-Protocol-Version': '2025-11-25' } });
+  assert.equal(listedTools.status, 200, JSON.stringify(listedTools.body));
+  assert.ok(listedTools.body.result.tools.length > 20);
+  assert.ok(listedTools.body.result.tools.every(tool => tool.name && tool.description && tool.inputSchema?.type === 'object'));
+
+  const wrongAudience = await server.call('POST', new URL(resource).pathname, {
+    jsonrpc: '2.0',
+    id: 3,
     method: 'tools/list'
   }, { headers: { Authorization: `Bearer ${tokens.access_token}`, 'MCP-Protocol-Version': '2025-11-25' } });
   assert.equal(wrongAudience.status, 401, 'An access token must be bound to the exact MCP resource URI.');
@@ -242,7 +255,7 @@ test('ChatGPT-compatible OAuth discovery, DCR, PKCE, refresh rotation, and MCP a
 
   const revokedAfterReplay = await server.call('POST', new URL(resource).pathname + new URL(resource).search, {
     jsonrpc: '2.0',
-    id: 3,
+    id: 4,
     method: 'tools/list'
   }, { headers: { Authorization: `Bearer ${refreshed.access_token}`, 'MCP-Protocol-Version': '2025-11-25' } });
   assert.equal(revokedAfterReplay.status, 401, 'Refresh-token replay must revoke the complete OAuth grant family.');

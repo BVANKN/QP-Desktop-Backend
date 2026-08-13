@@ -56,6 +56,22 @@ function sendAuthorizationErrorPage(ctx, error) {
   sendHtml(ctx, error?.status || 400, `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Authorization failed</title><style>body{font:14px "Segoe UI",sans-serif;background:#f5f5f5;color:#242424;display:grid;place-items:center;min-height:100vh;margin:0}.card{max-width:540px;background:#fff;border:1px solid #ddd;padding:28px;box-shadow:0 8px 28px #0002}h1{font-size:22px;font-weight:600;color:#a4262c}p{line-height:1.5}</style></head><body><main class="card"><h1>Authorization could not be completed</h1><p>${String(message).replace(/[&<>"']/g, value => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[value])}</p><p>Return to ChatGPT and try connecting again.</p></main></body></html>`);
 }
 
+// Chromium applies form-action to redirects after a form POST. Permit only the
+// pre-registered OAuth callback origin so the authorization code can return.
+function authorizationPageHeaders(model) {
+  let redirectOrigin = '';
+  try {
+    redirectOrigin = new URL(model?.request?.redirectUri || '').origin;
+  } catch {
+    // beginAuthorization/resumeAuthorization already validate redirect URIs.
+  }
+  const formActions = ["'self'", redirectOrigin].filter(Boolean).join(' ');
+  return {
+    'Content-Security-Policy': `default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; form-action ${formActions}; base-uri 'none'; frame-ancestors 'none'`,
+    'Referrer-Policy': 'no-referrer'
+  };
+}
+
 function safeAuthorizationRetryPath(value) {
   const path = String(value || '').trim();
   if (!path.startsWith('/oauth/authorize?') || path.length > 12_000) return '';
@@ -106,7 +122,7 @@ export function registerMcpRoutes(router) {
         notice: ctx.url.searchParams.get('qp_retry') === '1'
           ? 'The previous sign-in request was refreshed. Please authorize again.'
           : ''
-      }));
+      }), authorizationPageHeaders(model));
     } catch (error) {
       sendAuthorizationErrorPage(ctx, error);
     }
@@ -126,7 +142,12 @@ export function registerMcpRoutes(router) {
         password: form.get('password') || '',
         connectionId: form.get('connectionId') || ''
       }, { ip: ctx.ip, userAgent: ctx.req.headers['user-agent'] });
-      sendRedirect(ctx, redirect);
+      logger.info('MCP OAuth authorization approved; redirecting to the registered client.', {
+        requestId,
+        redirectOrigin: new URL(redirect).origin,
+        requestIdHeader: ctx.requestId
+      });
+      sendRedirect(ctx, redirect, 303);
     } catch (error) {
       if (retryPath && ['authorization_missing', 'authorization_expired'].includes(error?.reason)) {
         logger.warn('MCP OAuth authorization transaction was refreshed.', {
@@ -138,7 +159,7 @@ export function registerMcpRoutes(router) {
       }
       try {
         const model = await resumeAuthorization(requestId, csrf);
-        sendHtml(ctx, error?.status || 400, renderAuthorizationPage(model, { error: error.message }));
+        sendHtml(ctx, error?.status || 400, renderAuthorizationPage(model, { error: error.message }), authorizationPageHeaders(model));
       } catch {
         sendAuthorizationErrorPage(ctx, error);
       }
@@ -146,15 +167,28 @@ export function registerMcpRoutes(router) {
   });
   router.post('/oauth/token', async ctx => {
     consumeRateLimit('oauth-token', ctx.ip, config.rateLimit.oauthToken);
+    let grantType = 'unknown';
     try {
       const form = await readFormBody(ctx);
       const input = Object.fromEntries(form);
+      grantType = String(input.grant_type || 'unknown').slice(0, 40);
       let tokens;
       if (input.grant_type === 'authorization_code') tokens = await exchangeAuthorizationCode(input);
       else if (input.grant_type === 'refresh_token') tokens = await refreshOAuthToken(input);
       else throw new OAuthError('unsupported_grant_type', 'Only authorization_code and refresh_token are supported.');
+      logger.info('MCP OAuth token grant completed.', {
+        grantType,
+        clientIdPrefix: String(input.client_id || '').slice(0, 16),
+        requestIdHeader: ctx.requestId
+      });
       sendJson(ctx, 200, tokens, { Pragma: 'no-cache' });
     } catch (error) {
+      logger.warn('MCP OAuth token grant failed.', {
+        grantType,
+        error: error?.oauthError || error?.name || 'server_error',
+        reason: error?.message || 'The token request failed.',
+        requestIdHeader: ctx.requestId
+      });
       sendOAuthError(ctx, error);
     }
   });
