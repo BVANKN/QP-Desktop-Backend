@@ -3,7 +3,10 @@
 import { createApp } from './src/app.js';
 import { config } from './src/config/config.js';
 import { logger } from './src/core/logger.js';
+import { ensureSampleUser } from './src/modules/users/sample-user.js';
 
+const sampleUser = await ensureSampleUser();
+if (sampleUser.created) logger.warn('Default sample account provisioned. Disable or replace it before exposing a production service.', { email: '123@gmail.com' });
 const server = createApp();
 
 // Said once, loudly, at boot. Losing every account on the next restart is not
