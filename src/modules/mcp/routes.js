@@ -98,6 +98,9 @@ export function registerMcpRoutes(router) {
   router.get('/.well-known/oauth-protected-resource/mcp/:userId/:tenantId/:toolName', ctx => {
     sendJson(ctx, 200, mcpResourceMetadata(protectedResourceUrl(ctx), endpointBase(ctx)));
   });
+  router.get('/.well-known/oauth-protected-resource/ide/mcp/:userId', ctx => {
+    sendJson(ctx, 200, mcpResourceMetadata(protectedResourceUrl(ctx), endpointBase(ctx), { ide: true }));
+  });
 
   router.get('/.well-known/oauth-authorization-server', ctx => {
     sendJson(ctx, 200, authorizationServerMetadata(endpointBase(ctx)));

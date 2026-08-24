@@ -11,15 +11,21 @@ import { buildRouter } from './routes.js';
 import { ensureDataDir } from './lib/json-store.js';
 import { pruneExpiredSessions } from './modules/auth/session-store.js';
 import { AppError } from './core/errors.js';
+import { createIdeMcpSubsystem } from './modules/ide-mcp/index.js';
 
 export function createApp() {
   ensureDataDir();
-  const router = buildRouter();
+  const ideMcp = createIdeMcpSubsystem();
+  const router = buildRouter({ ideMcp });
 
   const server = http.createServer(async (req, res) => {
     const ctx = createContext(req, res);
     res.setHeader('X-Request-Id', ctx.requestId);
     applySecurityHeaders(res);
+    // Streamable HTTP is handled by the MCP SDK/Express adapter because it
+    // owns long-lived transport sessions and SSE responses. It still shares
+    // this HTTP server, QP OAuth issuer, storage, and account boundary.
+    if (ideMcp.handles(ctx.pathname)) return ideMcp.handle(req, res);
     if (applyCors(req, res)) return;
 
     try {
@@ -56,6 +62,17 @@ export function createApp() {
 
   server.requestTimeout = config.requestTimeoutMs;
   server.headersTimeout = Math.min(config.requestTimeoutMs, 10_000);
+  ideMcp.attach(server);
+  server.ideMcp = ideMcp;
+  const closeHttpServer = server.close.bind(server);
+  let closing = null;
+  server.close = callback => {
+    closing ||= ideMcp.close().catch(error => {
+      logger.error('IDE MCP shutdown failed', { error: error.message });
+    });
+    void closing.finally(() => closeHttpServer(callback));
+    return server;
+  };
 
   // Hourly session pruning keeps the sessions file bounded.
   const pruneTimer = setInterval(() => {

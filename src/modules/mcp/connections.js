@@ -17,6 +17,7 @@ function cleanIdentifier(value, field, maxLength = 128) {
 function publicConnection(connection) {
   return {
     id: connection.id,
+    kind: connection.kind || 'power-platform',
     name: connection.name,
     userId: connection.userId,
     tenantId: connection.tenantId,
@@ -43,6 +44,7 @@ export async function createMcpConnection(userId, input, endpointBase) {
   const now = new Date().toISOString();
   const record = {
     id,
+    kind: 'power-platform',
     userId,
     tenantId,
     tenantName: String(input.tenantName || '').trim().slice(0, 160),
@@ -88,7 +90,47 @@ export async function createMcpConnection(userId, input, endpointBase) {
 
 export async function listMcpConnections(userId) {
   const document = await store.read();
-  return document.connections.filter(item => item.userId === userId).map(publicConnection);
+  return document.connections.filter(item => item.userId === userId && item.kind !== 'ide').map(publicConnection);
+}
+
+/**
+ * Creates the account's OAuth-only IDE resource once. Unlike Power Platform
+ * connections it has no reusable static bearer key: MCP clients must complete
+ * QP OAuth and the desktop bridge must present a live QP product session.
+ */
+export async function ensureIdeMcpConnection(userId) {
+  return store.update(document => {
+    const existing = document.connections.find(item => item.userId === userId && item.kind === 'ide');
+    if (existing) {
+      existing.enabled = true;
+      existing.revokedAt = null;
+      return { result: publicConnection(existing) };
+    }
+    const now = new Date().toISOString();
+    const connection = {
+      id: randomId('ide'),
+      kind: 'ide',
+      userId,
+      tenantId: 'ide',
+      tenantName: 'Quicker Portal IDE',
+      environmentId: 'ide',
+      environmentName: 'Local workspaces',
+      name: 'Quicker Portal IDE',
+      captureMode: 'metadata',
+      enabled: true,
+      keyHash: null,
+      keyPrefix: null,
+      createdAt: now,
+      lastUsedAt: null,
+      revokedAt: null
+    };
+    document.connections.push(connection);
+    return { result: publicConnection(connection) };
+  });
+}
+
+export function ideMcpConnectionEndpoint(endpointBase, userId) {
+  return `${String(endpointBase).replace(/\/+$/, '')}/ide/mcp/${encodeURIComponent(userId)}`;
 }
 
 export function mcpConnectionEndpoint(endpointBase, connection) {
@@ -148,14 +190,16 @@ export async function authenticateMcpConnection({ userId, tenantId, authorizatio
   return { ...connection, lastUsedAt: now };
 }
 
-export function mcpResourceMetadata(resourceUrl, serviceBaseUrl) {
+export function mcpResourceMetadata(resourceUrl, serviceBaseUrl, { ide = false } = {}) {
   return {
     resource: resourceUrl,
-    resource_name: 'Quicker Portal Power Platform MCP',
+    resource_name: ide ? 'Quicker Portal IDE MCP' : 'Quicker Portal Power Platform MCP',
     authorization_servers: [serviceBaseUrl.replace(/\/+$/, '')],
     scopes_supported: ['mcp:read', 'mcp:write', 'offline_access'],
     bearer_methods_supported: ['header'],
-    resource_documentation: `${serviceBaseUrl.replace(/\/+$/, '')}/api/mcp/connections`,
-    quicker_portal_authentication: 'oauth-2.1-pkce-or-tenant-scoped-static-bearer-key'
+    resource_documentation: `${serviceBaseUrl.replace(/\/+$/, '')}${ide ? '/api/ide/bootstrap' : '/api/mcp/connections'}`,
+    quicker_portal_authentication: ide
+      ? 'oauth-2.1-pkce-with-premium-quicker-portal-account'
+      : 'oauth-2.1-pkce-or-tenant-scoped-static-bearer-key'
   };
 }

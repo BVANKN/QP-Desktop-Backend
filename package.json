@@ -14,6 +14,12 @@
     "test": "node --test \"test/*.test.js\"",
     "check": "node --check server.js && node ./scripts/check-syntax.mjs"
   },
-  "dependencies": {},
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "express": "^5.2.1",
+    "ignore": "^7.0.6",
+    "ws": "^8.21.3",
+    "zod": "^4.4.3"
+  },
   "devDependencies": {}
 }

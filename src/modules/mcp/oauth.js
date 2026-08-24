@@ -73,11 +73,13 @@ function normalizeResource(value, serviceBaseUrl) {
     throw new OAuthError('invalid_target', 'The MCP resource must use HTTPS.');
   }
   const segments = resource.pathname.split('/').filter(Boolean).map(segment => decodeURIComponent(segment));
-  if (segments.length < 3 || segments[0] !== 'mcp') {
+  const ideResource = segments.length === 3 && segments[0] === 'ide' && segments[1] === 'mcp';
+  const powerPlatformResource = segments.length >= 3 && segments[0] === 'mcp';
+  if (!ideResource && !powerPlatformResource) {
     throw new OAuthError('invalid_target', 'The MCP resource path is invalid.');
   }
-  const userId = cleanText(segments[1], 128);
-  const tenantId = cleanText(segments[2], 128);
+  const userId = cleanText(ideResource ? segments[2] : segments[1], 128);
+  const tenantId = cleanText(ideResource ? 'ide' : segments[2], 128);
   if (!userId || !tenantId) throw new OAuthError('invalid_target', 'The MCP resource scope is incomplete.');
   resource.searchParams.sort();
   return {
@@ -445,6 +447,41 @@ export async function revokeOAuthToken(input) {
   });
 }
 
+export async function listIdeOAuthGrants(userId) {
+  const [tokens, clients] = await Promise.all([tokenStore.read(), clientsStore.read()]);
+  const clientNames = new Map(clients.clients.map(client => [client.id, client.name]));
+  const grouped = new Map();
+  for (const grant of Object.values(tokens.grants)) {
+    if (grant.userId !== userId || grant.tenantId !== 'ide' || grant.revokedAt) continue;
+    const current = grouped.get(grant.clientId) || {
+      clientId: grant.clientId,
+      clientName: clientNames.get(grant.clientId) || grant.clientId,
+      grantedAt: grant.createdAt * 1000,
+      lastUsedAt: grant.lastUsedAt ? grant.lastUsedAt * 1000 : null,
+      scopes: new Set()
+    };
+    current.grantedAt = Math.min(current.grantedAt, grant.createdAt * 1000);
+    current.lastUsedAt = Math.max(current.lastUsedAt || 0, (grant.lastUsedAt || 0) * 1000) || null;
+    for (const scope of grant.scopes || []) current.scopes.add(scope);
+    grouped.set(grant.clientId, current);
+  }
+  return [...grouped.values()].map(item => ({ ...item, scopes: [...item.scopes] }));
+}
+
+export async function revokeIdeOAuthClient(userId, clientId) {
+  let revoked = 0;
+  await tokenStore.update(db => {
+    for (const grant of Object.values(db.grants)) {
+      if (grant.userId !== userId || grant.tenantId !== 'ide' || grant.clientId !== clientId || grant.revokedAt) continue;
+      grant.revokedAt = nowSeconds();
+      grant.revokedReason = 'qp_user_revocation';
+      revoked += 1;
+    }
+  });
+  await audit('ide.mcp.oauth_client_revoked', { userId, clientId, grants: revoked });
+  return revoked;
+}
+
 export async function authenticateMcpOAuthToken({ authorization, resource }) {
   const token = String(authorization || '').startsWith('Bearer ') ? String(authorization).slice(7).trim() : '';
   const parts = token.split('.');
@@ -465,7 +502,14 @@ export async function authenticateMcpOAuthToken({ authorization, resource }) {
       return {};
     }).catch(() => {});
   }
-  return { ...connection, oauth: true, oauthGrantId: grant.id, scopes: grant.scopes };
+  return {
+    ...connection,
+    oauth: true,
+    oauthGrantId: grant.id,
+    oauthClientId: grant.clientId,
+    scopes: grant.scopes,
+    resource: grant.resource
+  };
 }
 
 function escapeHtml(value) {
@@ -474,9 +518,14 @@ function escapeHtml(value) {
 
 export function renderAuthorizationPage(model, { error = '', notice = '' } = {}) {
   const { request, csrf, client, connections, retryPath } = model;
+  const ide = request.tenantId === 'ide';
   const scopeLabels = {
-    'mcp:read': 'Read Power Platform metadata and records through your connected desktop',
-    'mcp:write': 'Request changes; Quicker Portal still asks for local approval',
+    'mcp:read': ide
+      ? 'Read files and project structure from workspaces you open in Quicker Portal IDE'
+      : 'Read Power Platform metadata and records through your connected desktop',
+    'mcp:write': ide
+      ? 'Create, edit, move, and delete workspace files and request locally approved commands'
+      : 'Request changes; Quicker Portal still asks for local approval',
     offline_access: 'Stay connected using rotating refresh tokens'
   };
   const connectionChoices = connections.map(connection => `
@@ -486,17 +535,17 @@ export function renderAuthorizationPage(model, { error = '', notice = '' } = {})
     </label>`).join('');
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Authorize Quicker Portal MCP</title><style>
     *{box-sizing:border-box}body{margin:0;min-height:100vh;background:linear-gradient(135deg,#edf5ff,#f8f6fb 55%,#fff);color:#242424;font:14px/1.45 "Segoe UI",sans-serif;display:grid;place-items:center;padding:24px}.card{width:min(590px,100%);background:#fff;border:1px solid #ddd;border-radius:8px;box-shadow:0 16px 50px #18395d20;overflow:hidden}.head{padding:24px 28px 18px;border-bottom:1px solid #e5e5e5}.brand{display:flex;align-items:center;gap:10px;color:#0f6cbd;font-weight:600}.mark{width:30px;height:30px;border-radius:5px;background:#0f6cbd;color:#fff;display:grid;place-items:center}.head h1{font-size:24px;font-weight:600;margin:18px 0 4px}.head p{margin:0;color:#616161}.body{padding:22px 28px}.client{background:#f5f9fd;border-left:3px solid #0f6cbd;padding:12px 14px;margin-bottom:18px}.client strong,.client span{display:block}.client span{font-size:12px;color:#616161;margin-top:2px}.error,.notice{padding:10px 12px;margin-bottom:16px;border-left:3px solid}.error{background:#fde7e9;color:#a4262c;border-color:#c50f1f}.notice{background:#e5f1fb;color:#174a75;border-color:#0f6cbd}.field{display:grid;gap:6px;margin-top:13px}.field>span,.section-title{font-size:12px;font-weight:600}.field small{color:#616161}.field input{height:38px;border:1px solid #8a8886;padding:0 10px;font:inherit}.field input:focus{outline:2px solid #0f6cbd;outline-offset:-1px}.connections{display:grid;gap:7px;margin-top:8px}.connection-option{display:flex;gap:10px;align-items:center;border:1px solid #ddd;padding:10px 12px;cursor:pointer}.connection-option:has(input:checked){border-color:#0f6cbd;background:#f3f9fd}.connection-option span{display:grid}.connection-option small{color:#616161}.permissions{margin:8px 0 0;padding:0;list-style:none;display:grid;gap:7px}.permissions li{display:flex;gap:8px;color:#424242}.permissions li:before{content:'✓';color:#107c10;font-weight:700}.actions{display:flex;justify-content:flex-end;gap:8px;margin-top:22px}.actions button{min-height:36px;padding:0 16px;border:1px solid #8a8886;background:#fff;font:600 14px inherit;cursor:pointer}.actions .primary{background:#0f6cbd;border-color:#0f6cbd;color:#fff}.foot{font-size:11px;color:#616161;padding:13px 28px;background:#fafafa;border-top:1px solid #e5e5e5}@media(max-width:560px){body{padding:0}.card{border:0;border-radius:0;min-height:100vh}.head,.body{padding-left:20px;padding-right:20px}.actions{display:grid}.actions button{width:100%}}
-  </style></head><body><main class="card"><header class="head"><div class="brand"><span class="mark">QP</span>Quicker Portal</div><h1>Connect your Power Platform environment</h1><p>Sign in to Quicker Portal and approve the access requested by ${escapeHtml(client.name)}.</p></header><section class="body">
+  </style></head><body><main class="card"><header class="head"><div class="brand"><span class="mark">QP</span>Quicker Portal</div><h1>${ide ? 'Connect your IDE workspaces' : 'Connect your Power Platform environment'}</h1><p>Sign in with your Premium Quicker Portal account and approve the access requested by ${escapeHtml(client.name)}.</p></header><section class="body">
     ${notice ? `<div class="notice" role="status">${escapeHtml(notice)}</div>` : ''}
     ${error ? `<div class="error" role="alert">${escapeHtml(error)}</div>` : ''}
     <div class="client"><strong>${escapeHtml(client.name)}</strong><span>${escapeHtml(request.resource)}</span></div>
     <form method="post" action="/oauth/authorize"><input type="hidden" name="requestId" value="${escapeHtml(request.id)}"><input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><input type="hidden" name="retryPath" value="${escapeHtml(retryPath)}">
       <label class="field"><span>Quicker Portal user name or email</span><input name="identifier" autocomplete="username" maxlength="254" required autofocus><small>Use your Quicker Portal account, not your Microsoft work account.</small></label>
       <label class="field"><span>Password</span><input type="password" name="password" autocomplete="current-password" maxlength="${config.password.maxLength}" required></label>
-      <div class="field"><span class="section-title">Environment connection</span><div class="connections">${connectionChoices}</div></div>
+      <div class="field"><span class="section-title">${ide ? 'IDE workspace connection' : 'Environment connection'}</span><div class="connections">${connectionChoices}</div></div>
       <div class="field"><span class="section-title">Permissions requested</span><ul class="permissions">${request.scopes.map(scope => `<li>${escapeHtml(scopeLabels[scope] || scope)}</li>`).join('')}</ul></div>
       <div class="actions"><button name="decision" value="deny" formnovalidate>Cancel</button><button class="primary" name="decision" value="approve">Authorize</button></div>
-    </form></section><footer class="foot">Your Microsoft credentials remain in the Quicker Portal desktop. OAuth tokens are limited to this MCP endpoint and selected connection.</footer></main></body></html>`;
+    </form></section><footer class="foot">${ide ? 'Local files stay on your desktop. OAuth tokens are limited to this QP account and IDE MCP resource.' : 'Your Microsoft credentials remain in the Quicker Portal desktop. OAuth tokens are limited to this MCP endpoint and selected connection.'}</footer></main></body></html>`;
 }
 
 export function oauthErrorBody(error) {

@@ -1,11 +1,10 @@
 # QP-X-XRM Backend
 
-Account, authentication, and entitlement service for Quicker Portal.
-
-**Zero third-party runtime dependencies.** Everything is built on Node.js
-built-ins (`node:http`, `node:crypto`, `node:fs`, `node:net`, `node:tls`).
-`package.json` has an empty `dependencies` and `devDependencies` — tests run on
-the built-in `node:test` runner.
+Account, authentication, entitlement, Power Platform MCP, and live IDE MCP
+service for Quicker Portal. The account service is built primarily on Node.js
+built-ins; the IDE transport uses the official Model Context Protocol SDK,
+Express, WebSocket, Zod, and gitignore parsing. Tests use Node's built-in
+`node:test` runner.
 
 ## Quick start
 
@@ -54,6 +53,8 @@ src/
     audit/audit.js            append-only security event log
     mcp/                      Streamable HTTP protocol, tool catalog, broker,
                               OAuth 2.1, connection keys, and transmission analytics
+    ide-mcp/                  Premium per-user IDE MCP + WebSocket composition
+    ide-codewriter/           live workspace, file, command, git, and verification engine
   routes.js                   HTTP surface
 ```
 
@@ -143,6 +144,13 @@ exponential account lockout after repeated failures.
 | POST | `/oauth/revoke` | — | Revoke an OAuth grant |
 | POST | `/mcp/:userId/:tenantId` | OAuth or MCP Bearer | Stateless Streamable HTTP JSON-RPC endpoint |
 | POST | `/mcp/:userId/:tenantId/:toolName` | OAuth or MCP Bearer | Optional one-tool-scoped endpoint |
+| GET | `/api/ide/bootstrap` | QP Bearer + Premium | Return this user's IDE MCP and bridge endpoints |
+| GET | `/api/ide/status` | QP Bearer + Premium | Live desktop/workspace/MCP session status |
+| GET | `/api/ide/grants` | QP Bearer + Premium | List OAuth clients authorized for this IDE resource |
+| DELETE | `/api/ide/grants/:clientId` | QP Bearer + Premium | Revoke one IDE OAuth client and its tokens |
+| GET | `/.well-known/oauth-protected-resource/ide/mcp/:userId` | — | IDE RFC 9728 protected-resource discovery |
+| POST | `/ide/mcp/:userId` | Resource-bound OAuth + Premium | Streamable HTTP IDE MCP endpoint |
+| WebSocket | `/ide/bridge` | QP Bearer + Premium | Live desktop filesystem/command action bridge |
 
 ## MCP architecture
 
@@ -159,6 +167,28 @@ The backend is a broker, not a Dataverse credential store:
 The server is stateless at the MCP protocol layer, so `GET` session streams and `DELETE` session termination return `405`; clients use JSON responses to `POST`. The standard endpoint exposes all tools, while the optional final path segment limits discovery and calls to one tool.
 
 The generated connection also includes a one-time `qpmcp.*` bearer key for legacy clients that support custom headers but not OAuth. ChatGPT should use OAuth automatic discovery; do not paste the legacy key into ChatGPT. Revoking the Quicker Portal connection invalidates both OAuth grants and the legacy key.
+
+### IDE MCP architecture
+
+The IDE reuses the same Quicker Portal product account as the rest of the
+desktop app. It has no separate IDE username, password, token store, or user
+database.
+
+1. A signed-in Premium desktop calls `/api/ide/bootstrap` with its short-lived
+   QP product access token. The response contains `/ide/mcp/{userId}` and the
+   `/ide/bridge` transport URL; it never contains a second reusable API key.
+2. The desktop opens the WebSocket with that same rotating QP token. The
+   backend verifies the session is still active and recomputes Premium
+   entitlement before accepting it.
+3. An external MCP client connects to the per-user MCP URL and completes the
+   existing QP OAuth 2.1 authorization-code flow with S256 PKCE. Consent is
+   bound to the exact IDE resource and QP user.
+4. Reads, edits, file creation/deletion, commands, git checkpoints, and live
+   output travel through the authenticated WebSocket to the user's desktop.
+   The backend never mounts or reads the user's project directory.
+5. Every MCP request rechecks current Premium entitlement. Signing out or
+   downgrading also stops the desktop bridge immediately; revoking a grant
+   invalidates that MCP client's hashed tokens.
 
 ## Configuration
 
@@ -186,6 +216,12 @@ Every value has a safe default; override with environment variables.
 | `QP_MCP_OAUTH_ACCESS_TTL_SECONDS` | `900` | Resource-bound MCP access-token lifetime |
 | `QP_MCP_OAUTH_REFRESH_TTL_SECONDS` | `2592000` | Rotating refresh-token lifetime |
 | `QP_MCP_OAUTH_MAX_CLIENTS` | `1000` | Retained dynamic OAuth client limit |
+| `QP_IDE_MCP_ALLOWED_HOSTS` | public MCP host + loopback | Exact Host allow-list for IDE Streamable HTTP |
+| `QP_IDE_MCP_CLIENT_BUDGET_MS` | `60000` | End-to-end MCP client request budget |
+| `QP_IDE_MCP_BRIDGE_RPC_TIMEOUT_MS` | budget minus 12s | Desktop action timeout with response headroom |
+| `QP_IDE_MCP_BRIDGE_PING_TIMEOUT_MS` | `8000` | Desktop liveness probe timeout |
+| `QP_IDE_MCP_MAX_READ_BYTES` | `1048576` | Maximum combined text returned by a read call |
+| `QP_IDE_MCP_MAX_FILE_BYTES` | `5242880` | Maximum individual text file size |
 
 ### Verification codes are currently static
 

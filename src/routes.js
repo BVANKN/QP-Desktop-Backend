@@ -14,7 +14,7 @@ import {
   validatePassword,
   requireVerificationCode
 } from './lib/validation.js';
-import { ValidationError } from './core/errors.js';
+import { ForbiddenError, ValidationError } from './core/errors.js';
 import {
   startSignup,
   resendSignupCode,
@@ -30,9 +30,10 @@ import { changePlan, entitlementsForUser } from './modules/plans/subscription-st
 import { accountCount, findUserById, publicUser, updateUser } from './modules/users/user-repo.js';
 import { issueAccessToken } from './lib/tokens.js';
 import { audit } from './modules/audit/audit.js';
-import { registerMcpRoutes } from './modules/mcp/routes.js';
+import { endpointBase, registerMcpRoutes } from './modules/mcp/routes.js';
+import { listIdeOAuthGrants, revokeIdeOAuthClient } from './modules/mcp/oauth.js';
 
-export function buildRouter() {
+export function buildRouter({ ideMcp } = {}) {
   const router = new Router();
 
   registerMcpRoutes(router);
@@ -65,6 +66,48 @@ export function buildRouter() {
 
   router.get('/api/plans', ctx => {
     sendJson(ctx, 200, { ok: true, plans: publicPlanCatalog() });
+  });
+
+  router.get('/api/ide/bootstrap', authenticate, async ctx => {
+    const entitlements = await entitlementsForUser(ctx.auth.sub);
+    if (!entitlements.features.includes('mcp.server')) {
+      throw new ForbiddenError('Quicker Portal IDE requires an active Premium account.', 'IDE_PREMIUM_REQUIRED');
+    }
+    if (!ideMcp) throw new Error('The IDE MCP subsystem is unavailable.');
+    const bootstrap = await ideMcp.bootstrap(ctx.auth.sub, endpointBase(ctx));
+    const user = await findUserById(ctx.auth.sub);
+    sendJson(ctx, 200, {
+      ok: true,
+      user: publicUser(user),
+      plan: { id: entitlements.planId, name: planById(entitlements.planId).name },
+      entitlements: entitlements.features,
+      ...bootstrap
+    });
+  });
+
+  router.get('/api/ide/status', authenticate, async ctx => {
+    const entitlements = await entitlementsForUser(ctx.auth.sub);
+    if (!entitlements.features.includes('mcp.server')) {
+      throw new ForbiddenError('Quicker Portal IDE requires an active Premium account.', 'IDE_PREMIUM_REQUIRED');
+    }
+    sendJson(ctx, 200, { ok: true, ...ideMcp.status(ctx.auth.sub) });
+  });
+
+  router.get('/api/ide/grants', authenticate, async ctx => {
+    const entitlements = await entitlementsForUser(ctx.auth.sub);
+    if (!entitlements.features.includes('mcp.server')) {
+      throw new ForbiddenError('Quicker Portal IDE requires an active Premium account.', 'IDE_PREMIUM_REQUIRED');
+    }
+    sendJson(ctx, 200, { ok: true, grants: await listIdeOAuthGrants(ctx.auth.sub) });
+  });
+
+  router.delete('/api/ide/grants/:clientId', authenticate, async ctx => {
+    const entitlements = await entitlementsForUser(ctx.auth.sub);
+    if (!entitlements.features.includes('mcp.server')) {
+      throw new ForbiddenError('Quicker Portal IDE requires an active Premium account.', 'IDE_PREMIUM_REQUIRED');
+    }
+    const revoked = await revokeIdeOAuthClient(ctx.auth.sub, cleanString(ctx.params.clientId, { field: 'OAuth client', maxLength: 300 }));
+    sendJson(ctx, 200, { ok: true, revoked });
   });
 
   // ------------------------------------------------------------- signup ---
