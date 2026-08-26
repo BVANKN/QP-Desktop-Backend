@@ -26,6 +26,9 @@ services:
         value: 0.0.0.0
       - key: NODE_ENV
         value: production
+      # Never provision the documented development/sample account publicly.
+      - key: QP_SEED_SAMPLE_USER
+        value: "false"
       # Set to 1 only because Render's proxy sets X-Forwarded-For. Without a
       # trusted proxy in front, clients could spoof their rate-limit identity.
       - key: QP_BACKEND_TRUST_PROXY
