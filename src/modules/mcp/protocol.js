@@ -166,7 +166,12 @@ async function executeTool(ctx, connection, tool, args, id) {
     const job = await enqueueDesktopToolCall({ connection, tool, arguments: args, requestId });
     const completed = await waitForDesktopJob(job.id, Math.min(tool.timeoutMs, config.mcp.desktopTimeoutMs));
     executionResult = completed.result;
-    if (executionResult?.ok === false) throw new Error(executionResult.error || 'Quicker Portal desktop action failed.');
+    if (executionResult?.ok === false) {
+      const desktopError = new Error(executionResult.error || 'Quicker Portal desktop action failed.');
+      desktopError.code = executionResult.code || 'DESKTOP_EXECUTION_FAILED';
+      desktopError.details = executionResult.details;
+      throw desktopError;
+    }
     const value = executionResult?.result ?? executionResult;
     await recordTransmission({ connection, tool, requestId, arguments: args, result: value, startedAt });
     return { jsonrpc: '2.0', id, result: resultContent(value) };
@@ -174,7 +179,11 @@ async function executeTool(ctx, connection, tool, args, id) {
     await recordTransmission({ connection, tool, requestId, arguments: args, result: executionResult, error, startedAt }).catch(() => {});
     return { jsonrpc: '2.0', id, result: {
       content: [{ type: 'text', text: error.message || 'Quicker Portal tool execution failed.' }],
-      structuredContent: { code: 'DESKTOP_EXECUTION_FAILED', error: error.message || String(error) },
+      structuredContent: {
+        code: error.code || 'DESKTOP_EXECUTION_FAILED',
+        error: error.message || String(error),
+        ...(error.details ? { details: error.details } : {})
+      },
       isError: true
     } };
   }
@@ -240,7 +249,7 @@ export async function handleMcpRequest(ctx, { scopedToolName } = {}) {
       protocolVersion: requested,
       capabilities: { tools: { listChanged: false }, resources: { subscribe: false, listChanged: false } },
       serverInfo: { name: 'Quicker Portal Power Platform MCP', version: '1.0.0', description: 'Executes Power Platform operations through the user-connected Quicker Portal desktop.' },
-      instructions: 'The selected Quicker Portal desktop and tenant are authoritative. Minimize columns and row counts on reads. Preview and confirm destructive changes. Managed solution components may be read-only.'
+      instructions: 'The selected Quicker Portal desktop and tenant are authoritative. Read the latest component before changing it. For existing cloud flows, forms, views, and text web resources, use the patch_* tool: send only targeted operations or exact anchors, never ask the user for a complete artifact and never reconstruct unchanged content from memory. The desktop performs read-modify-validate-write with stale-write protection. Use complete update_* replacements only for explicit import or recovery. Table, column, row, app, environment-variable, connection-reference, plug-in-step, and command-bar updates already accept semantic partial changes. PCF changes belong in source files and are deployed through the IDE/build/solution workflow. Minimize columns and row counts on reads. Preview and confirm destructive changes. Managed solution components may be read-only.'
     } }, { 'MCP-Protocol-Version': requested });
   }
   if (body.method === 'notifications/initialized' || body.method.startsWith('notifications/')) return sendAccepted(ctx);
