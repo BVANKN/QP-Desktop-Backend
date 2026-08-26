@@ -130,19 +130,28 @@ test('/me returns the caller identity and entitlements', async () => {
   assert.equal(me.body.plan.id, 'free');
 });
 
-test('refresh rotates the token and the old one stops working', async () => {
+test('refresh rotation tolerates an immediate same-client retry but still revokes cross-client replay', async () => {
   const { session } = await registerUser({ username: 'refreshuser', email: 'refresh@example.com' });
 
   const first = await server.call('POST', '/api/auth/refresh', { refreshToken: session.refreshToken });
   assert.equal(first.status, 200);
   assert.notEqual(first.body.refreshToken, session.refreshToken);
 
-  // Replaying the rotated token is treated as theft: the session dies.
-  const replay = await server.call('POST', '/api/auth/refresh', { refreshToken: session.refreshToken });
+  // Real clients can issue two refreshes concurrently or retry after losing the
+  // first response. The same immediately-previous token from the same client
+  // must return the already-issued rotation instead of revoking the session.
+  const retry = await server.call('POST', '/api/auth/refresh', { refreshToken: session.refreshToken });
+  assert.equal(retry.status, 200, JSON.stringify(retry.body));
+  assert.equal(retry.body.refreshToken, first.body.refreshToken);
+
+  // The same old token from a different client fingerprint is still replay and
+  // revokes the complete session family.
+  const replay = await server.call('POST', '/api/auth/refresh', { refreshToken: session.refreshToken }, {
+    headers: { 'User-Agent': 'different-refresh-client' }
+  });
   assert.equal(replay.status, 401);
   assert.equal(replay.body.code, 'SESSION_REVOKED');
 
-  // And the token issued by the legitimate rotation is now dead too.
   const afterRevoke = await server.call('POST', '/api/auth/refresh', { refreshToken: first.body.refreshToken });
   assert.equal(afterRevoke.status, 401);
 });

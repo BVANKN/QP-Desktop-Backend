@@ -144,6 +144,11 @@ export async function mutateOAuthGrant(grantId, mutator) {
       const outcome = await mutator(value ? structuredClone(value) : null) || {};
       if (!current) return outcome.result;
       const revision = current._rev || 1;
+      if (outcome.write === false) {
+        const stillCurrent = await collection.findOne({ id: grantId, _rev: revision }, { projection: { _id: 1 } });
+        if (stillCurrent) return outcome.result;
+        continue;
+      }
       const next = outcome.value || value;
       const replacement = { ...next, _rev: revision + 1 };
       const updated = await collection.replaceOne({ id: grantId, _rev: revision }, replacement);

@@ -190,20 +190,45 @@ test('QP OAuth, bridge, workspace reads, and writes work end to end', async () =
   const mcpSessionId = initialized.response.headers.get('mcp-session-id');
   assert.ok(mcpSessionId);
 
-  const listed = await mcpCall(bootstrap.mcpUrl, tokens.access_token, {
+  const refreshForm = new URLSearchParams({
+    grant_type: 'refresh_token',
+    client_id: client.client_id,
+    refresh_token: tokens.refresh_token,
+    resource: bootstrap.mcpUrl
+  });
+  const refreshedResponse = await fetch(`${server.baseUrl}/oauth/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: refreshForm
+  });
+  const refreshed = await refreshedResponse.json();
+  assert.equal(refreshedResponse.status, 200, JSON.stringify(refreshed));
+  assert.notEqual(refreshed.refresh_token, tokens.refresh_token);
+
+  const refreshRetryResponse = await fetch(`${server.baseUrl}/oauth/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: refreshForm
+  });
+  const refreshRetry = await refreshRetryResponse.json();
+  assert.equal(refreshRetryResponse.status, 200, JSON.stringify(refreshRetry));
+  assert.equal(refreshRetry.access_token, refreshed.access_token);
+  assert.equal(refreshRetry.refresh_token, refreshed.refresh_token);
+
+  const listed = await mcpCall(bootstrap.mcpUrl, refreshed.access_token, {
     jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'list_workspaces', arguments: {} }
   }, mcpSessionId);
   assert.ok(listed.body?.result?.structuredContent?.workspaces, JSON.stringify(listed.body));
   assert.equal(listed.body.result.structuredContent.workspaces[0].name, 'hello-project');
 
-  const read = await mcpCall(bootstrap.mcpUrl, tokens.access_token, {
+  const read = await mcpCall(bootstrap.mcpUrl, refreshed.access_token, {
     jsonrpc: '2.0', id: 3, method: 'tools/call',
     params: { name: 'read_files', arguments: { workspaceId: registered.workspaceId, paths: ['hello.js'] } }
   }, mcpSessionId);
   assert.equal(read.body.result.structuredContent.files[0].content, content);
 
   const updatedContent = 'console.log("updated");\n';
-  const written = await mcpCall(bootstrap.mcpUrl, tokens.access_token, {
+  const written = await mcpCall(bootstrap.mcpUrl, refreshed.access_token, {
     jsonrpc: '2.0', id: 4, method: 'tools/call',
     params: { name: 'write_files', arguments: {
       workspaceId: registered.workspaceId,
@@ -221,7 +246,7 @@ test('QP OAuth, bridge, workspace reads, and writes work end to end', async () =
   const revoked = await server.call('DELETE', `/api/ide/grants/${encodeURIComponent(client.client_id)}`, undefined, { accessToken: session.accessToken });
   assert.equal(revoked.status, 200);
   assert.ok(revoked.body.revoked >= 1);
-  const afterRevoke = await mcpCall(bootstrap.mcpUrl, tokens.access_token, {
+  const afterRevoke = await mcpCall(bootstrap.mcpUrl, refreshed.access_token, {
     jsonrpc: '2.0', id: 5, method: 'ping'
   }, mcpSessionId);
   assert.equal(afterRevoke.response.status, 401);

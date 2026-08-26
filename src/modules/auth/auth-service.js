@@ -288,7 +288,7 @@ export async function login({ identifier, password, ip, userAgent }) {
 // --------------------------------------------------------------- refresh ---
 
 export async function refresh({ refreshToken, ip, userAgent }) {
-  const rotated = await rotateSession(refreshToken);
+  const rotated = await rotateSession(refreshToken, { ip, userAgent });
   if (!rotated.ok) {
     if (rotated.reason === 'reuse') {
       throw new AuthenticationError('Session security check failed. Sign in again.', 'SESSION_REVOKED');

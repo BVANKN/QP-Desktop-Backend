@@ -95,6 +95,7 @@ export const config = Object.freeze({
       codeTtlSeconds: intEnv('QP_MCP_OAUTH_CODE_TTL_SECONDS', 5 * 60),
       accessTtlSeconds: intEnv('QP_MCP_OAUTH_ACCESS_TTL_SECONDS', 15 * 60),
       refreshTtlSeconds: intEnv('QP_MCP_OAUTH_REFRESH_TTL_SECONDS', 30 * 24 * 60 * 60),
+      refreshRetryGraceSeconds: intEnv('QP_MCP_OAUTH_REFRESH_RETRY_GRACE_SECONDS', 10),
       maxClients: intEnv('QP_MCP_OAUTH_MAX_CLIENTS', 1000)
     })
   }),
@@ -104,6 +105,7 @@ export const config = Object.freeze({
     audience: 'quicker-portal-desktop',
     accessTtlSeconds: intEnv('QP_ACCESS_TOKEN_TTL_SECONDS', 15 * 60),
     refreshTtlSeconds: intEnv('QP_REFRESH_TOKEN_TTL_SECONDS', 30 * 24 * 60 * 60),
+    refreshRetryGraceSeconds: intEnv('QP_REFRESH_RETRY_GRACE_SECONDS', 10),
     // Sliding refresh: each rotation extends the session up to this absolute cap.
     sessionAbsoluteTtlSeconds: intEnv('QP_SESSION_ABSOLUTE_TTL_SECONDS', 90 * 24 * 60 * 60)
   }),

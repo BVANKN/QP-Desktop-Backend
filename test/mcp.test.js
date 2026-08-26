@@ -349,9 +349,32 @@ test('ChatGPT-compatible OAuth discovery, DCR, PKCE, refresh rotation, and MCP a
   assert.equal(refreshResponse.status, 200, JSON.stringify(refreshed));
   assert.notEqual(refreshed.refresh_token, tokens.refresh_token);
 
-  const replayResponse = await fetch(`${server.baseUrl}/oauth/token`, {
+  // A duplicate request from the same MCP client can happen when refreshes race
+  // at access-token expiry or the first response is lost. Return the exact same
+  // rotation instead of branching or revoking the connection.
+  const retryResponse = await fetch(`${server.baseUrl}/oauth/token`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'refresh_token',
+      client_id: registered.body.client_id,
+      refresh_token: tokens.refresh_token,
+      resource
+    })
+  });
+  const retry = await retryResponse.json();
+  assert.equal(retryResponse.status, 200, JSON.stringify(retry));
+  assert.equal(retry.access_token, refreshed.access_token);
+  assert.equal(retry.refresh_token, refreshed.refresh_token);
+
+  // A different client fingerprint presenting that rotated token is still a
+  // replay attack and must revoke the entire grant family.
+  const replayResponse = await fetch(`${server.baseUrl}/oauth/token`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'User-Agent': 'different-mcp-refresh-client'
+    },
     body: new URLSearchParams({
       grant_type: 'refresh_token',
       client_id: registered.body.client_id,

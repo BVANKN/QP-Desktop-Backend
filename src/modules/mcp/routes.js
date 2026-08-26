@@ -177,7 +177,10 @@ export function registerMcpRoutes(router) {
       grantType = String(input.grant_type || 'unknown').slice(0, 40);
       let tokens;
       if (input.grant_type === 'authorization_code') tokens = await exchangeAuthorizationCode(input);
-      else if (input.grant_type === 'refresh_token') tokens = await refreshOAuthToken(input);
+      else if (input.grant_type === 'refresh_token') tokens = await refreshOAuthToken(input, {
+        ip: ctx.ip,
+        userAgent: ctx.req.headers['user-agent']
+      });
       else throw new OAuthError('unsupported_grant_type', 'Only authorization_code and refresh_token are supported.');
       logger.info('MCP OAuth token grant completed.', {
         grantType,

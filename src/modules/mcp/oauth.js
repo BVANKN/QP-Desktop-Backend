@@ -1,6 +1,12 @@
 import { createHash } from 'node:crypto';
 import { config } from '../../config/config.js';
 import { randomId, randomToken, safeEqual, sha256Hex } from '../../lib/crypto.js';
+import {
+  openRefreshReplay,
+  refreshClientFingerprint,
+  replayWithinGrace,
+  sealRefreshReplay
+} from '../../lib/refresh-replay.js';
 import { login, logout } from '../auth/auth-service.js';
 import { entitlementsForUser } from '../plans/subscription-store.js';
 import { audit } from '../audit/audit.js';
@@ -393,7 +399,7 @@ export async function exchangeAuthorizationCode(input) {
   return tokenResponse(issued.grant, issued.tokens);
 }
 
-export async function refreshOAuthToken(input) {
+export async function refreshOAuthToken(input, requestContext = {}) {
   const clientId = cleanText(input.client_id, 300);
   const presented = cleanText(input.refresh_token, 1000);
   const resource = cleanText(input.resource, 3000);
@@ -402,19 +408,40 @@ export async function refreshOAuthToken(input) {
   if (parts.length !== 3 || parts[0] !== 'qport') throw new OAuthError('invalid_grant', 'The refresh token is invalid.');
   const grantId = parts[1];
   const presentedHash = sha256Hex(presented);
+  const fingerprint = refreshClientFingerprint(requestContext);
   const issued = await mutateOAuthGrant(grantId, grant => {
     if (!grant || grant.clientId !== clientId || grant.resource !== resource || grant.revokedAt || grant.refreshExpiresAt <= nowSeconds()) {
       throw new OAuthError('invalid_grant', 'The refresh token is invalid or expired.');
     }
     if ((grant.previousRefreshTokenHashes || []).includes(presentedHash)) {
-      grant.revokedAt = nowSeconds();
+      const now = nowSeconds();
+      if (replayWithinGrace(grant.refreshReplay, {
+        previousHash: presentedHash,
+        fingerprint,
+        now,
+        graceSeconds: config.mcp.oauth.refreshRetryGraceSeconds
+      })) {
+        const tokens = openRefreshReplay(grant.refreshReplay?.sealed);
+        if (tokens?.accessToken && tokens?.refreshToken) {
+          return { write: false, result: { grant, tokens, replayed: true } };
+        }
+      }
+      grant.revokedAt = now;
       grant.revokedReason = 'refresh_token_reuse';
       return { value: grant, result: { reuseDetected: true, grant } };
     }
     if (!safeEqual(grant.refreshTokenHash, presentedHash)) throw new OAuthError('invalid_grant', 'The refresh token is invalid.');
-    grant.previousRefreshTokenHashes = [...(grant.previousRefreshTokenHashes || []).slice(-9), grant.refreshTokenHash];
+    const previousHash = grant.refreshTokenHash;
+    grant.previousRefreshTokenHashes = [...(grant.previousRefreshTokenHashes || []).slice(-9), previousHash];
     const tokens = createGrantTokens(grant, true);
-    grant.lastUsedAt = nowSeconds();
+    const now = nowSeconds();
+    grant.refreshReplay = fingerprint ? {
+      previousHash,
+      fingerprint,
+      rotatedAt: now,
+      sealed: sealRefreshReplay(tokens)
+    } : null;
+    grant.lastUsedAt = now;
     return { value: grant, result: { grant, tokens } };
   });
   if (issued?.reuseDetected) {

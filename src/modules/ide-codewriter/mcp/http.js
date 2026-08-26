@@ -9,7 +9,7 @@ import { createLogger } from '../logger.js';
 const log = createLogger('mcp-http');
 
 /** Sessions idle for this long are torn down. */
-const SESSION_IDLE_MS = 60 * 60 * 1000;
+const SESSION_IDLE_MS = config.sessionIdleMs;
 
 /**
  * The MCP endpoint.

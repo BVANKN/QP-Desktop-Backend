@@ -36,6 +36,7 @@ export const config = Object.freeze({
   bridgeRpcTimeoutMs: intEnv('QP_IDE_MCP_BRIDGE_RPC_TIMEOUT_MS', Math.max(5_000, clientRequestBudgetMs - responseHeadroomMs)),
   bridgePingTimeoutMs: intEnv('QP_IDE_MCP_BRIDGE_PING_TIMEOUT_MS', 8_000),
   bridgeWriteTimeoutMs: intEnv('QP_IDE_MCP_BRIDGE_WRITE_TIMEOUT_MS', Math.max(5_000, clientRequestBudgetMs - responseHeadroomMs)),
+  sessionIdleMs: intEnv('QP_IDE_MCP_SESSION_IDLE_MS', 6 * 60 * 60 * 1000),
   clientRequestBudgetMs,
   responseHeadroomMs,
   logLevel: process.env.QP_LOG_LEVEL || 'info',
