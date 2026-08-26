@@ -2,17 +2,13 @@
 #
 # THE DISK IS THE POINT OF THIS FILE.
 #
-# Every user record, password hash, refresh session, token signing key, and MCP
-# connection lives in JSON files under QP_BACKEND_DATA_DIR. A Render service
-# without a mounted disk has an ephemeral filesystem: it is recreated on every
-# deploy, every restart, and every wake from idle. Without the disk below the
-# service loses every account it has ever created, and the symptom is silent —
-# signup works, then the same credentials are rejected minutes later, and MCP
-# connections stop authorizing because their signing keys are gone too.
+# User records are stored in MongoDB Atlas. The Render disk below is still used
+# by the current backend for refresh sessions, signing keys, pending signups,
+# audit data, and other filesystem-backed state. We can migrate those stores to
+# MongoDB later and remove the disk once they are no longer filesystem-backed.
 #
-# `data/` is deliberately gitignored (it holds password hashes and signing
-# keys), so a deploy never carries state with it. The disk is the only thing
-# that keeps state alive between releases.
+# `data/` remains deliberately gitignored because it contains other sensitive
+# runtime state. User password hashes are now stored in MongoDB.
 #
 # Note: mounting a disk requires a paid instance type. On a free instance this
 # service will lose data on every spin-down no matter what else is configured.
@@ -33,6 +29,15 @@ services:
     envVars:
       - key: QP_BACKEND_DATA_DIR
         value: /var/data
+      # MongoDB Atlas connection string. Set the secret value in Render.
+      - key: MONGODB_URI
+        sync: false
+      # Optional database name; defaults to QPC when omitted.
+      - key: MONGODB_DB_NAME
+        value: QPC
+      # Never provision the development sample account on the public service.
+      - key: QP_SEED_SAMPLE_USER
+        value: "false"
       # Render routes external traffic to this port and terminates TLS in front
       # of it, so binding to all interfaces here is expected.
       - key: QP_BACKEND_HOST

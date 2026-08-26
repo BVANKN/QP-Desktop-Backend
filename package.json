@@ -2,7 +2,7 @@
   "name": "qp-x-xrm-backend",
   "version": "1.0.0",
   "private": true,
-  "description": "Quicker Portal account, authentication, and entitlement service. Zero third-party runtime dependencies — Node.js built-ins only.",
+  "description": "Quicker Portal account, authentication, and entitlement service.",
   "type": "module",
   "main": "server.js",
   "engines": {
@@ -19,7 +19,8 @@
     "express": "^5.2.1",
     "ignore": "^7.0.6",
     "ws": "^8.21.3",
-    "zod": "^4.4.3"
+    "zod": "^4.4.3",
+    "mongodb": "^6.20.0"
   },
   "devDependencies": {}
 }

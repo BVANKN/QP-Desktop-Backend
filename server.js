@@ -4,6 +4,10 @@ import { createApp } from './src/app.js';
 import { config } from './src/config/config.js';
 import { logger } from './src/core/logger.js';
 import { ensureSampleUser } from './src/modules/users/sample-user.js';
+import { closeMongoDb, initializeMongoDb } from './src/lib/mongodb.js';
+
+const mongo = await initializeMongoDb();
+if (mongo.migratedUsers) logger.info('Migrated legacy JSON users into MongoDB.', { count: mongo.migratedUsers });
 
 const sampleUser = await ensureSampleUser();
 if (sampleUser.created) logger.warn('Default sample account provisioned. Disable or replace it before exposing a production service.', { email: '123@gmail.com' });
@@ -25,14 +29,18 @@ server.listen(config.port, config.host, () => {
     env: config.env,
     dataDir: config.dataDir,
     mailTransport: config.mail.transport,
-    storagePersistent: config.storage.persistent
+    storagePersistent: config.storage.persistent,
+    database: 'mongodb'
   });
 });
 
 for (const signal of ['SIGINT', 'SIGTERM']) {
   process.on(signal, () => {
     logger.info(`Received ${signal}, shutting down`);
-    server.close(() => process.exit(0));
+    server.close(async () => {
+      try { await closeMongoDb(); } catch (error) { logger.error('MongoDB shutdown failed', { error: String(error?.stack || error) }); }
+      process.exit(0);
+    });
     // Force-exit if connections refuse to drain.
     setTimeout(() => process.exit(0), 5000).unref();
   });

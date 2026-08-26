@@ -64,7 +64,7 @@ All state lives under `data/` (owner-only `0700` directories, `0600` files):
 
 ```
 data/
-  users/users.json            user records + email/username indexes
+  users/users.json            legacy user records used only for one-time MongoDB migration
   users/pending-signups.json  unverified signups (no user row exists yet)
   plans/subscriptions.json    subscription + plan state, kept separate from identity
   sessions/sessions.json      refresh sessions (hashes only, never raw tokens)
