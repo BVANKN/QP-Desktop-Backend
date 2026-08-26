@@ -1,15 +1,25 @@
 import { createHash } from 'node:crypto';
 import { config } from '../../config/config.js';
-import { JsonStore } from '../../lib/json-store.js';
 import { randomId, randomToken, safeEqual, sha256Hex } from '../../lib/crypto.js';
 import { login, logout } from '../auth/auth-service.js';
 import { entitlementsForUser } from '../plans/subscription-store.js';
 import { audit } from '../audit/audit.js';
 import { activeMcpConnectionsForResource, findMcpConnectionById } from './connections.js';
-
-const clientsStore = new JsonStore('mcp/oauth-clients.json', { version: 1, clients: [] });
-const authorizationStore = new JsonStore('mcp/oauth-authorizations.json', { version: 1, requests: {} });
-const tokenStore = new JsonStore('mcp/oauth-tokens.json', { version: 1, codes: {}, grants: {} });
+import {
+  consumeAuthorizationAndCreateCode,
+  consumeCodeAndCreateGrant,
+  findOAuthAuthorizationRecord,
+  findOAuthClientRecord,
+  findOAuthCodeRecord,
+  findOAuthGrantRecord,
+  listOAuthClientRecords,
+  listOAuthGrantRecords,
+  markOAuthAuthorizationUsed,
+  mutateOAuthGrant,
+  registerOAuthClientRecord,
+  revokeOAuthClientGrants,
+  saveOAuthAuthorization
+} from './oauth-store.js';
 
 const SUPPORTED_SCOPES = Object.freeze(['mcp:read', 'mcp:write', 'offline_access']);
 const MAX_REDIRECT_URIS = 10;
@@ -142,20 +152,19 @@ export async function registerOAuthClient(input = {}) {
     createdAt: nowSeconds(),
     lastUsedAt: null
   };
-  await clientsStore.update(db => {
-    db.clients = db.clients.filter(item => item.createdAt > nowSeconds() - 180 * 24 * 60 * 60);
-    if (db.clients.length >= config.mcp.oauth.maxClients) {
-      throw new OAuthError('temporarily_unavailable', 'The OAuth client registration limit has been reached.', 503);
-    }
-    db.clients.push(client);
+  const stored = await registerOAuthClientRecord(client, {
+    maxClients: config.mcp.oauth.maxClients,
+    cutoff: nowSeconds() - 180 * 24 * 60 * 60
   });
+  if (!stored) {
+    throw new OAuthError('temporarily_unavailable', 'The OAuth client registration limit has been reached.', 503);
+  }
   await audit('mcp.oauth.client_registered', { clientId: client.id, clientName: client.name });
   return clientPublicRecord(client);
 }
 
 async function findClient(clientId) {
-  const db = await clientsStore.read();
-  return db.clients.find(item => item.id === clientId) || null;
+  return findOAuthClientRecord(clientId);
 }
 
 async function resourceConnections(resourceInfo) {
@@ -208,12 +217,7 @@ export async function beginAuthorization(params, serviceBaseUrl, requestContext 
     ip: cleanText(requestContext.ip, 100),
     userAgent: cleanText(requestContext.userAgent, 200)
   };
-  await authorizationStore.update(db => {
-    for (const [id, item] of Object.entries(db.requests)) {
-      if (item.expiresAt <= now || item.usedAt) delete db.requests[id];
-    }
-    db.requests[requestId] = record;
-  });
+  await saveOAuthAuthorization(record);
   return authorizationPageModel(record, csrf, client, connections);
 }
 
@@ -231,8 +235,10 @@ async function authorizationPageModel(record, csrf, knownClient, knownConnection
 }
 
 export async function resumeAuthorization(requestId, csrf) {
-  const db = await authorizationStore.read();
-  return authorizationPageModel(db.requests[cleanText(requestId, 128)], cleanText(csrf, 128));
+  return authorizationPageModel(
+    await findOAuthAuthorizationRecord(cleanText(requestId, 128)),
+    cleanText(csrf, 128)
+  );
 }
 
 function redirectWithResult(redirectUri, values) {
@@ -261,10 +267,7 @@ export async function completeAuthorization(input, requestContext = {}) {
   const model = await resumeAuthorization(requestId, csrf);
   const { request } = model;
   if (input.decision === 'deny') {
-    await authorizationStore.update(db => {
-      const current = db.requests[requestId];
-      if (current && !current.usedAt) current.usedAt = nowSeconds();
-    });
+    await markOAuthAuthorizationUsed(requestId, { csrfHash: request.csrfHash, now: nowSeconds() });
     await audit('mcp.oauth.authorization_denied', { clientId: request.clientId, userId: request.resourceUserId, tenantId: request.tenantId });
     return redirectWithResult(request.redirectUri, { error: 'access_denied', error_description: 'The user denied access.', state: request.state });
   }
@@ -293,36 +296,32 @@ export async function completeAuthorization(input, requestContext = {}) {
     throw new OAuthError('access_denied', 'The selected MCP connection is no longer active.', 403);
   }
 
-  const consumed = await authorizationStore.update(db => {
-    const current = db.requests[requestId];
-    if (!current || current.usedAt || current.expiresAt <= nowSeconds() || !safeEqual(current.csrfHash, sha256Hex(csrf))) return { result: false };
-    current.usedAt = nowSeconds();
-    return { result: true };
-  });
-  if (!consumed) throw new OAuthError('invalid_request', 'This authorization request was already completed.');
-
   const codeId = randomId('qpoac');
   const codeSecret = randomToken(32);
   const code = `${codeId}.${codeSecret}`;
   const now = nowSeconds();
-  await tokenStore.update(db => {
-    for (const [id, item] of Object.entries(db.codes)) if (item.expiresAt <= now || item.usedAt) delete db.codes[id];
-    db.codes[codeId] = {
-      id: codeId,
-      codeHash: sha256Hex(code),
-      clientId: request.clientId,
-      redirectUri: request.redirectUri,
-      codeChallenge: request.codeChallenge,
-      resource: request.resource,
-      userId: request.resourceUserId,
-      tenantId: request.tenantId,
-      connectionId,
-      scopes: request.scopes,
-      createdAt: now,
-      expiresAt: now + config.mcp.oauth.codeTtlSeconds,
-      usedAt: null
-    };
+  const codeRecord = {
+    id: codeId,
+    codeHash: sha256Hex(code),
+    clientId: request.clientId,
+    redirectUri: request.redirectUri,
+    codeChallenge: request.codeChallenge,
+    resource: request.resource,
+    userId: request.resourceUserId,
+    tenantId: request.tenantId,
+    connectionId,
+    scopes: request.scopes,
+    createdAt: now,
+    expiresAt: now + config.mcp.oauth.codeTtlSeconds,
+    usedAt: null
+  };
+  const consumed = await consumeAuthorizationAndCreateCode({
+    requestId,
+    csrfHash: request.csrfHash,
+    now,
+    codeRecord
   });
+  if (!consumed) throw new OAuthError('invalid_request', 'This authorization request was already completed.');
   await audit('mcp.oauth.authorization_approved', { clientId: request.clientId, userId: request.resourceUserId, tenantId: request.tenantId, connectionId, scopes: request.scopes });
   return redirectWithResult(request.redirectUri, { code, state: request.state });
 }
@@ -365,34 +364,31 @@ export async function exchangeAuthorizationCode(input) {
   const resource = cleanText(input.resource, 3000);
   if (!await findClient(clientId)) throw new OAuthError('invalid_client', 'The OAuth client is unknown.', 401);
   const [codeId] = code.split('.');
-  let issued;
-  await tokenStore.update(db => {
-    const record = db.codes[codeId];
-    if (!record || record.usedAt || record.expiresAt <= nowSeconds() || !safeEqual(record.codeHash, sha256Hex(code))) {
-      throw new OAuthError('invalid_grant', 'The authorization code is invalid, expired, or already used.');
-    }
-    if (record.clientId !== clientId || record.redirectUri !== redirectUri || record.resource !== resource || !pkceMatches(verifier, record.codeChallenge)) {
-      throw new OAuthError('invalid_grant', 'The authorization code binding could not be verified.');
-    }
-    record.usedAt = nowSeconds();
-    const grant = {
-      id: randomId('qpog'),
-      clientId,
-      userId: record.userId,
-      tenantId: record.tenantId,
-      connectionId: record.connectionId,
-      resource: record.resource,
-      scopes: record.scopes,
-      createdAt: nowSeconds(),
-      lastUsedAt: null,
-      previousRefreshTokenHashes: [],
-      revokedAt: null,
-      revokedReason: null
-    };
-    const tokens = createGrantTokens(grant, grant.scopes.includes('offline_access'));
-    db.grants[grant.id] = grant;
-    issued = { grant, tokens };
-  });
+  const record = await findOAuthCodeRecord(codeId);
+  if (!record || record.usedAt || record.expiresAt <= nowSeconds() || !safeEqual(record.codeHash, sha256Hex(code))) {
+    throw new OAuthError('invalid_grant', 'The authorization code is invalid, expired, or already used.');
+  }
+  if (record.clientId !== clientId || record.redirectUri !== redirectUri || record.resource !== resource || !pkceMatches(verifier, record.codeChallenge)) {
+    throw new OAuthError('invalid_grant', 'The authorization code binding could not be verified.');
+  }
+  const grant = {
+    id: randomId('qpog'),
+    clientId,
+    userId: record.userId,
+    tenantId: record.tenantId,
+    connectionId: record.connectionId,
+    resource: record.resource,
+    scopes: record.scopes,
+    createdAt: nowSeconds(),
+    lastUsedAt: null,
+    previousRefreshTokenHashes: [],
+    revokedAt: null,
+    revokedReason: null
+  };
+  const tokens = createGrantTokens(grant, grant.scopes.includes('offline_access'));
+  const consumed = await consumeCodeAndCreateGrant({ codeId, codeHash: sha256Hex(code), now: nowSeconds(), grant });
+  if (!consumed) throw new OAuthError('invalid_grant', 'The authorization code is invalid, expired, or already used.');
+  const issued = { grant, tokens };
   await audit('mcp.oauth.token_issued', { grantId: issued.grant.id, clientId, userId: issued.grant.userId, connectionId: issued.grant.connectionId });
   return tokenResponse(issued.grant, issued.tokens);
 }
@@ -405,24 +401,21 @@ export async function refreshOAuthToken(input) {
   const parts = presented.split('.');
   if (parts.length !== 3 || parts[0] !== 'qport') throw new OAuthError('invalid_grant', 'The refresh token is invalid.');
   const grantId = parts[1];
-  let issued;
-  await tokenStore.update(db => {
-    const grant = db.grants[grantId];
-    const presentedHash = sha256Hex(presented);
+  const presentedHash = sha256Hex(presented);
+  const issued = await mutateOAuthGrant(grantId, grant => {
     if (!grant || grant.clientId !== clientId || grant.resource !== resource || grant.revokedAt || grant.refreshExpiresAt <= nowSeconds()) {
       throw new OAuthError('invalid_grant', 'The refresh token is invalid or expired.');
     }
-    if (grant.previousRefreshTokenHashes.includes(presentedHash)) {
+    if ((grant.previousRefreshTokenHashes || []).includes(presentedHash)) {
       grant.revokedAt = nowSeconds();
       grant.revokedReason = 'refresh_token_reuse';
-      issued = { reuseDetected: true, grant };
-      return;
+      return { value: grant, result: { reuseDetected: true, grant } };
     }
     if (!safeEqual(grant.refreshTokenHash, presentedHash)) throw new OAuthError('invalid_grant', 'The refresh token is invalid.');
-    grant.previousRefreshTokenHashes = [...grant.previousRefreshTokenHashes.slice(-9), grant.refreshTokenHash];
+    grant.previousRefreshTokenHashes = [...(grant.previousRefreshTokenHashes || []).slice(-9), grant.refreshTokenHash];
     const tokens = createGrantTokens(grant, true);
     grant.lastUsedAt = nowSeconds();
-    issued = { grant, tokens };
+    return { value: grant, result: { grant, tokens } };
   });
   if (issued?.reuseDetected) {
     await audit('mcp.oauth.refresh_reuse_detected', { grantId, clientId, userId: issued.grant.userId });
@@ -436,22 +429,25 @@ export async function revokeOAuthToken(input) {
   const presented = cleanText(input.token, 1000);
   const parts = presented.split('.');
   if (parts.length !== 3 || !['qpoat', 'qport'].includes(parts[0])) return;
-  await tokenStore.update(db => {
-    const grant = db.grants[parts[1]];
-    if (!grant) return;
-    const tokenHash = sha256Hex(presented);
+  const tokenHash = sha256Hex(presented);
+  await mutateOAuthGrant(parts[1], grant => {
+    if (!grant) return { result: null };
     if (safeEqual(grant.accessTokenHash, tokenHash) || safeEqual(grant.refreshTokenHash, tokenHash)) {
       grant.revokedAt = nowSeconds();
       grant.revokedReason = 'client_revocation';
     }
+    return { value: grant, result: null };
   });
 }
 
 export async function listIdeOAuthGrants(userId) {
-  const [tokens, clients] = await Promise.all([tokenStore.read(), clientsStore.read()]);
-  const clientNames = new Map(clients.clients.map(client => [client.id, client.name]));
+  const [grants, clients] = await Promise.all([
+    listOAuthGrantRecords({ userId, tenantId: 'ide' }),
+    listOAuthClientRecords()
+  ]);
+  const clientNames = new Map(clients.map(client => [client.id, client.name]));
   const grouped = new Map();
-  for (const grant of Object.values(tokens.grants)) {
+  for (const grant of grants) {
     if (grant.userId !== userId || grant.tenantId !== 'ide' || grant.revokedAt) continue;
     const current = grouped.get(grant.clientId) || {
       clientId: grant.clientId,
@@ -469,14 +465,12 @@ export async function listIdeOAuthGrants(userId) {
 }
 
 export async function revokeIdeOAuthClient(userId, clientId) {
-  let revoked = 0;
-  await tokenStore.update(db => {
-    for (const grant of Object.values(db.grants)) {
-      if (grant.userId !== userId || grant.tenantId !== 'ide' || grant.clientId !== clientId || grant.revokedAt) continue;
-      grant.revokedAt = nowSeconds();
-      grant.revokedReason = 'qp_user_revocation';
-      revoked += 1;
-    }
+  const revoked = await revokeOAuthClientGrants({
+    userId,
+    tenantId: 'ide',
+    clientId,
+    now: nowSeconds(),
+    reason: 'qp_user_revocation'
   });
   await audit('ide.mcp.oauth_client_revoked', { userId, clientId, grants: revoked });
   return revoked;
@@ -486,8 +480,7 @@ export async function authenticateMcpOAuthToken({ authorization, resource }) {
   const token = String(authorization || '').startsWith('Bearer ') ? String(authorization).slice(7).trim() : '';
   const parts = token.split('.');
   if (parts.length !== 3 || parts[0] !== 'qpoat') throw new OAuthError('invalid_token', 'The OAuth access token is invalid.', 401);
-  const db = await tokenStore.read();
-  const grant = db.grants[parts[1]];
+  const grant = await findOAuthGrantRecord(parts[1]);
   if (!grant || grant.revokedAt || grant.accessExpiresAt <= nowSeconds() || grant.resource !== resource || !safeEqual(grant.accessTokenHash, sha256Hex(token))) {
     throw new OAuthError('invalid_token', 'The OAuth access token is invalid, expired, or intended for another resource.', 401);
   }
@@ -496,10 +489,10 @@ export async function authenticateMcpOAuthToken({ authorization, resource }) {
     throw new OAuthError('invalid_token', 'The Quicker Portal MCP connection was revoked.', 401);
   }
   if (!grant.lastUsedAt || nowSeconds() - grant.lastUsedAt > 60) {
-    tokenStore.update(current => {
-      const found = current.grants[grant.id];
-      if (found) found.lastUsedAt = nowSeconds();
-      return {};
+    void mutateOAuthGrant(grant.id, current => {
+      if (!current) return { result: null };
+      current.lastUsedAt = nowSeconds();
+      return { value: current, result: null };
     }).catch(() => {});
   }
   return {

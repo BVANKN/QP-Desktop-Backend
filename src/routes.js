@@ -55,10 +55,12 @@ export function buildRouter({ ideMcp } = {}) {
       service: 'qp-x-xrm-backend',
       time: new Date().toISOString(),
       storage: {
+        mode: config.storage.mode,
         persistent: config.storage.persistent,
         accounts,
+        ...(config.storage.mode === 'mongodb' ? { database: config.mongo.database } : {}),
         ...(config.storage.persistent ? {} : {
-          warning: 'Accounts are stored on an ephemeral filesystem and will be lost on the next restart. Mount a disk and set QP_BACKEND_DATA_DIR to it.'
+          warning: 'Accounts are stored on an ephemeral filesystem and will be lost on the next restart. Configure MONGODB_URI or mount a persistent disk and set QP_BACKEND_DATA_DIR.'
         })
       }
     });

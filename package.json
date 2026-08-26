@@ -2,7 +2,7 @@
   "name": "qp-x-xrm-backend",
   "version": "1.0.0",
   "private": true,
-  "description": "Quicker Portal account, authentication, and entitlement service. Zero third-party runtime dependencies — Node.js built-ins only.",
+  "description": "Quicker Portal account, authentication, entitlement, and MCP service with MongoDB Atlas persistence.",
   "type": "module",
   "main": "server.js",
   "engines": {
@@ -12,7 +12,8 @@
     "start": "node server.js",
     "dev": "node --watch server.js",
     "test": "node --test \"test/*.test.js\"",
-    "check": "node --check server.js && node ./scripts/check-syntax.mjs"
+    "check": "node --check server.js && node ./scripts/check-syntax.mjs",
+    "migrate:mongo": "node ./scripts/migrate-json-to-mongo.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",

@@ -1,15 +1,10 @@
-// Storage persistence reporting.
-//
-// Every account, password hash, refresh session, signing key, and MCP
-// connection is a JSON file under the configured data directory. On a managed
-// host with an ephemeral filesystem and no mounted disk, all of it is
-// destroyed on each deploy or wake-from-idle — and the service keeps answering
-// every request as though nothing happened. The only visible symptom is that
-// credentials which worked an hour ago are rejected, which reads as a login
-// bug rather than as data loss. These assertions exist so that failure can
-// never be silent again.
+// Storage persistence reporting. Atlas is authoritative when MONGODB_URI is
+// configured; local development/tests retain the filesystem adapter. These
+// assertions keep the active mode explicit so a managed deployment cannot
+// silently fall back to ephemeral account storage.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { useTemporaryDataDir, startTestServer } from './helpers/test-server.js';
 
 const dataDir = useTemporaryDataDir();
@@ -22,6 +17,7 @@ test('health reports storage as persistent when a data directory is configured',
     assert.equal(response.body.ok, true);
     // The test harness sets QP_BACKEND_DATA_DIR, which is the operator saying
     // "this points at real storage".
+    assert.equal(response.body.storage.mode, 'filesystem');
     assert.equal(response.body.storage.persistent, true);
     assert.equal(response.body.storage.warning, undefined);
     // Reported without paths, counts, or any identity data.
@@ -43,9 +39,43 @@ test('an ephemeral deployment is detected and reported loudly', async () => {
   // operator pointing at a mounted disk.
   assert.equal(isPersistentStorage({ dataDirConfigured: true, managedHost: true }), true);
 
+  // MongoDB makes managed-host persistence independent of the local disk.
+  assert.equal(isPersistentStorage({ dataDirConfigured: false, managedHost: true, mongoConfigured: true }), true);
+
   // A plain machine keeps its filesystem either way.
   assert.equal(isPersistentStorage({ dataDirConfigured: false, managedHost: false }), true);
   assert.equal(isPersistentStorage({ dataDirConfigured: true, managedHost: false }), true);
+});
+
+test('Mongo configuration is recognized as persistent on a managed host without exposing the URI', () => {
+  const script = `
+    import { config } from './src/config/config.js';
+    process.stdout.write(JSON.stringify({
+      mode: config.storage.mode,
+      persistent: config.storage.persistent,
+      database: config.mongo.database,
+      uriConfigured: Boolean(config.mongo.uri)
+    }));
+  `;
+  const output = execFileSync(process.execPath, ['--input-type=module', '--eval', script], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      RENDER: 'true',
+      MONGODB_URI: 'mongodb://example.invalid:27017/?retryWrites=true',
+      MONGODB_DB_NAME: 'qp_config_probe',
+      QP_BACKEND_DATA_DIR: ''
+    },
+    encoding: 'utf8'
+  });
+  const result = JSON.parse(output);
+  assert.deepEqual(result, {
+    mode: 'mongodb',
+    persistent: true,
+    database: 'qp_config_probe',
+    uriConfigured: true
+  });
+  assert.equal(output.includes('example.invalid'), false, 'configuration probes must not print the database URI');
 });
 
 test('accounts are reported as present once one exists, and survive a restart of the app object', async () => {
@@ -74,8 +104,8 @@ test('accounts are reported as present once one exists, and survive a restart of
     assert.equal(login.status, 200, 'a freshly created account must be able to sign in');
     assert.equal(login.body.user.username, 'storageprobe');
 
-    // Signing keys live in the same directory. If they were regenerated, the
-    // refresh token minted a moment ago would no longer verify.
+    // In filesystem fallback mode the signing key lives beside the local
+    // state. If it were regenerated, the refresh token would no longer verify.
     const refreshed = await server.call('POST', '/api/auth/refresh', { refreshToken: login.body.refreshToken });
     assert.equal(refreshed.status, 200, 'signing keys must persist alongside the accounts');
   } finally {
@@ -83,7 +113,7 @@ test('accounts are reported as present once one exists, and survive a restart of
   }
 });
 
-test('the data directory is where every piece of identity state lives', async () => {
+test('the local fallback keeps all identity state under the configured data directory', async () => {
   const fs = await import('node:fs');
   const path = await import('node:path');
   // Named explicitly so a future move of any of these is a deliberate change

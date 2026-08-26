@@ -7,6 +7,9 @@ import path from 'node:path';
 
 export function useTemporaryDataDir() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qp-backend-test-'));
+  delete process.env.MONGODB_URI;
+  delete process.env.MONGODB_DB_NAME;
+  delete process.env.QP_SIGNING_SECRET;
   process.env.QP_BACKEND_DATA_DIR = dir;
   process.env.QP_MAIL_TRANSPORT = 'outbox';
   process.env.QP_LOG_LEVEL = 'error';

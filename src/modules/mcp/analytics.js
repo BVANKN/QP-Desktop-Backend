@@ -4,6 +4,7 @@ import path from 'node:path';
 import readline from 'node:readline';
 import { AppendOnlyLog } from '../../lib/json-store.js';
 import { config } from '../../config/config.js';
+import { mongoCollection, mongoEnabled } from '../../lib/mongo.js';
 
 const log = new AppendOnlyLog('mcp/transmissions.jsonl');
 const SENSITIVE_KEY = /(authorization|token|secret|password|cookie|connectionstring|clientsecret|certificate|privatekey)/i;
@@ -83,8 +84,10 @@ export async function recordTransmission({ connection, tool, requestId, argument
     time: new Date().toISOString(),
     userId: connection.userId,
     tenantId: connection.tenantId,
+    tenantKey: String(connection.tenantId || '').toLowerCase(),
     tenantName: connection.tenantName,
     environmentId: connection.environmentId,
+    environmentKey: String(connection.environmentId || '').toLowerCase(),
     environmentName: connection.environmentName,
     connectionId: connection.id,
     toolName: tool.name,
@@ -102,11 +105,90 @@ export async function recordTransmission({ connection, tool, requestId, argument
     request: connection.captureMode === 'detailed' ? redact(args) : undefined,
     response: connection.captureMode === 'detailed' ? redact(result) : undefined
   };
-  await log.append(entry);
+  if (mongoEnabled()) {
+    await (await mongoCollection('mcp_transmissions')).insertOne(entry);
+  } else {
+    await log.append(entry);
+  }
   return entry;
 }
 
+async function queryMongoTransmissionAnalytics(userId, filters = {}) {
+  const collection = await mongoCollection('mcp_transmissions');
+  const limit = Math.min(Math.max(Number(filters.limit) || 200, 1), 1000);
+  const transmissionId = String(filters.transmissionId || '').trim();
+  const includePayloads = filters.includePayloads === true || filters.includePayloads === 'true';
+  const sinceMs = filters.since ? Date.parse(filters.since) : 0;
+  const match = { userId };
+  if (filters.tenantId) match.tenantKey = String(filters.tenantId).toLowerCase();
+  if (filters.environmentId) match.environmentKey = String(filters.environmentId).toLowerCase();
+  if (filters.toolName) match.toolName = filters.toolName;
+  if (transmissionId) match.id = transmissionId;
+  if (sinceMs) match.time = { $gte: new Date(sinceMs).toISOString() };
+
+  const [summaryRows, byTool, byTable, transmissions, tables, columns, records] = await Promise.all([
+    collection.aggregate([
+      { $match: match },
+      { $group: {
+        _id: null,
+        totalCalls: { $sum: 1 },
+        successfulCalls: { $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] } },
+        failedCalls: { $sum: { $cond: [{ $eq: ['$status', 'failed'] }, 1, 0] } },
+        requestBytes: { $sum: { $ifNull: ['$requestBytes', 0] } },
+        responseBytes: { $sum: { $ifNull: ['$responseBytes', 0] } }
+      } }
+    ]).toArray(),
+    collection.aggregate([
+      { $match: match },
+      { $group: {
+        _id: '$toolName',
+        calls: { $sum: 1 },
+        failures: { $sum: { $cond: [{ $eq: ['$status', 'failed'] }, 1, 0] } },
+        requestBytes: { $sum: { $ifNull: ['$requestBytes', 0] } },
+        responseBytes: { $sum: { $ifNull: ['$responseBytes', 0] } }
+      } },
+      { $sort: { calls: -1 } }
+    ]).toArray(),
+    collection.aggregate([
+      { $match: match },
+      { $unwind: '$tables' },
+      { $group: {
+        _id: '$tables',
+        transmissions: { $sum: 1 },
+        columns: { $addToSet: '$columns' },
+        recordIds: { $addToSet: '$recordIds' }
+      } },
+      { $sort: { transmissions: -1 } }
+    ]).toArray(),
+    collection.find(match, includePayloads ? {} : { projection: { request: 0, response: 0, _id: 0 } })
+      .sort({ time: -1 }).limit(limit).toArray(),
+    collection.distinct('tables', match),
+    collection.distinct('columns', match),
+    collection.distinct('recordIds', match)
+  ]);
+
+  const baseRow = summaryRows[0] || { totalCalls: 0, successfulCalls: 0, failedCalls: 0, requestBytes: 0, responseBytes: 0 };
+  const { _id: ignoredSummaryId, ...base } = baseRow;
+  return {
+    summary: {
+      ...base,
+      tablesTouched: tables.length,
+      columnsTouched: columns.length,
+      recordsTouched: records.length
+    },
+    byTool: byTool.map(row => ({ name: row._id, calls: row.calls, failures: row.failures, requestBytes: row.requestBytes, responseBytes: row.responseBytes })),
+    byTable: byTable.map(row => ({
+      name: row._id,
+      transmissions: row.transmissions,
+      columns: [...new Set((row.columns || []).flat())],
+      recordIds: [...new Set((row.recordIds || []).flat())]
+    })),
+    transmissions: transmissions.map(({ _id, ...entry }) => entry)
+  };
+}
+
 export async function queryTransmissionAnalytics(userId, filters = {}) {
+  if (mongoEnabled()) return queryMongoTransmissionAnalytics(userId, filters);
   const limit = Math.min(Math.max(Number(filters.limit) || 200, 1), 1000);
   const transmissionId = String(filters.transmissionId || '').trim();
   const includePayloads = filters.includePayloads === true || filters.includePayloads === 'true';

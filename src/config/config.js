@@ -6,6 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const backendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+const mongoUri = process.env.MONGODB_URI || '';
 
 function intEnv(name, fallback) {
   const raw = process.env[name];
@@ -22,17 +23,12 @@ function boolEnv(name, fallback) {
 }
 
 /**
- * Whether state written to the data directory survives a restart.
- *
- * An explicitly configured data directory is taken as the operator having
- * pointed it at real storage — a mounted disk, a volume, a host path. Without
- * one, on a host that advertises itself as managed, the container filesystem
- * is all there is, and it is recreated on every deploy and every wake from
- * idle. Exported as a plain function so the rule itself can be asserted rather
- * than inferred from whichever environment the tests happen to run in.
+ * Whether the configured persistence survives a restart. MongoDB is durable
+ * independently of the local filesystem; otherwise an explicitly configured
+ * data directory is treated as an operator-provided persistent volume.
  */
-export function isPersistentStorage({ dataDirConfigured, managedHost }) {
-  return Boolean(dataDirConfigured) || !managedHost;
+export function isPersistentStorage({ dataDirConfigured, managedHost, mongoConfigured = false }) {
+  return Boolean(mongoConfigured) || Boolean(dataDirConfigured) || !managedHost;
 }
 
 export const config = Object.freeze({
@@ -40,22 +36,22 @@ export const config = Object.freeze({
   host: process.env.QP_BACKEND_HOST || '127.0.0.1',
   port: intEnv('QP_BACKEND_PORT', 4817),
 
-  // Filesystem layout. dataDir holds all persistent state and is created with
-  // owner-only permissions on boot.
+  // Filesystem layout. Used by local development/tests and for the outbox.
+  // Production state moves to MongoDB when MONGODB_URI is configured.
   dataDir: process.env.QP_BACKEND_DATA_DIR || path.join(backendRoot, 'data'),
 
-  // Whether the state written to dataDir actually survives a restart.
-  //
-  // Every account, password hash, refresh session, token signing key, and MCP
-  // connection is a JSON file under dataDir. On a managed host the container
-  // filesystem is recreated on each deploy, restart, and wake from idle, so
-  // without a mounted disk all of it is destroyed — and the only symptom is
-  // that credentials which worked an hour ago are suddenly rejected, with a
-  // perfectly healthy-looking service behind them.
-  //
-  // An explicitly configured dataDir is taken as the operator having pointed
-  // it at a real volume. Without one, on a host that advertises itself as
-  // managed, the storage is ephemeral and the service says so loudly.
+  mongo: Object.freeze({
+    uri: mongoUri,
+    database: process.env.MONGODB_DB_NAME || 'quicker_portal',
+    maxPoolSize: intEnv('MONGODB_MAX_POOL_SIZE', 10),
+    maxIdleTimeMs: intEnv('MONGODB_MAX_IDLE_TIME_MS', 60_000),
+    serverSelectionTimeoutMs: intEnv('MONGODB_SERVER_SELECTION_TIMEOUT_MS', 8_000),
+    connectTimeoutMs: intEnv('MONGODB_CONNECT_TIMEOUT_MS', 8_000)
+  }),
+
+  // Production state is durable when Atlas is configured. Filesystem mode is
+  // retained for local development/tests and can still be durable when the
+  // operator explicitly points QP_BACKEND_DATA_DIR at a persistent volume.
   storage: Object.freeze({
     dataDirConfigured: Boolean(process.env.QP_BACKEND_DATA_DIR),
     managedHost: Boolean(
@@ -66,7 +62,14 @@ export const config = Object.freeze({
       process.env.FLY_APP_NAME
     ),
     get persistent() {
-      return isPersistentStorage(this);
+      return isPersistentStorage({
+        dataDirConfigured: this.dataDirConfigured,
+        managedHost: this.managedHost,
+        mongoConfigured: Boolean(mongoUri)
+      });
+    },
+    get mode() {
+      return mongoUri ? 'mongodb' : 'filesystem';
     }
   }),
 

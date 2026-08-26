@@ -3,8 +3,12 @@
 import { createApp } from './src/app.js';
 import { config } from './src/config/config.js';
 import { logger } from './src/core/logger.js';
+import { closeMongo, initializeMongo, mongoEnabled } from './src/lib/mongo.js';
+import { initializeSigningKeys } from './src/lib/key-store.js';
 import { ensureSampleUser } from './src/modules/users/sample-user.js';
 
+if (mongoEnabled()) await initializeMongo();
+await initializeSigningKeys();
 const sampleUser = await ensureSampleUser();
 if (sampleUser.created) logger.warn('Default sample account provisioned. Disable or replace it before exposing a production service.', { email: '123@gmail.com' });
 const server = createApp();
@@ -14,7 +18,7 @@ const server = createApp();
 if (!config.storage.persistent) {
   logger.error('Account storage is EPHEMERAL — every account, session, signing key, and MCP connection will be lost on the next restart or deploy.', {
     dataDir: config.dataDir,
-    fix: 'Mount a persistent disk and set QP_BACKEND_DATA_DIR to its mount path (see render.yaml).'
+    fix: 'Configure MONGODB_URI for Atlas persistence, or mount a persistent disk and set QP_BACKEND_DATA_DIR.'
   });
 }
 
@@ -23,7 +27,9 @@ server.listen(config.port, config.host, () => {
     host: config.host,
     port: config.port,
     env: config.env,
-    dataDir: config.dataDir,
+    storageMode: config.storage.mode,
+    database: config.storage.mode === 'mongodb' ? config.mongo.database : undefined,
+    dataDir: config.storage.mode === 'filesystem' ? config.dataDir : undefined,
     mailTransport: config.mail.transport,
     storagePersistent: config.storage.persistent
   });
@@ -32,7 +38,9 @@ server.listen(config.port, config.host, () => {
 for (const signal of ['SIGINT', 'SIGTERM']) {
   process.on(signal, () => {
     logger.info(`Received ${signal}, shutting down`);
-    server.close(() => process.exit(0));
+    server.close(() => {
+      void closeMongo().finally(() => process.exit(0));
+    });
     // Force-exit if connections refuse to drain.
     setTimeout(() => process.exit(0), 5000).unref();
   });

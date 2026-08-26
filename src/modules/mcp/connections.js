@@ -1,5 +1,6 @@
 import { JsonStore } from '../../lib/json-store.js';
 import { randomId, randomToken, safeEqual, sha256Hex } from '../../lib/crypto.js';
+import { mongoCollection, mongoEnabled } from '../../lib/mongo.js';
 import { AuthenticationError, NotFoundError, ValidationError } from '../../core/errors.js';
 
 const store = new JsonStore('mcp/connections.json', { version: 1, connections: [] });
@@ -47,8 +48,10 @@ export async function createMcpConnection(userId, input, endpointBase) {
     kind: 'power-platform',
     userId,
     tenantId,
+    tenantKey: tenantId.toLowerCase(),
     tenantName: String(input.tenantName || '').trim().slice(0, 160),
     environmentId,
+    environmentKey: environmentId.toLowerCase(),
     environmentName: String(input.environmentName || '').trim().slice(0, 160),
     name,
     captureMode,
@@ -59,16 +62,26 @@ export async function createMcpConnection(userId, input, endpointBase) {
     lastUsedAt: null,
     revokedAt: null
   };
-  await store.update(document => {
-    const revokedCutoff = Date.now() - REVOKED_RETENTION_MS;
-    document.connections = document.connections.filter(item => !item.revokedAt || Date.parse(item.revokedAt) >= revokedCutoff);
-    const activeCount = document.connections.filter(item => item.userId === userId && item.enabled).length;
+  if (mongoEnabled()) {
+    const collection = await mongoCollection('mcp_connections');
+    await collection.deleteMany({ revokedAt: { $ne: null, $lt: new Date(Date.now() - REVOKED_RETENTION_MS).toISOString() } });
+    const activeCount = await collection.countDocuments({ userId, enabled: true });
     if (activeCount >= MAX_ACTIVE_CONNECTIONS_PER_USER) {
       throw new ValidationError(`A Quicker Portal account can have at most ${MAX_ACTIVE_CONNECTIONS_PER_USER} active MCP connections. Revoke an unused connection first.`);
     }
-    document.connections.push(record);
-    return { result: record };
-  });
+    await collection.insertOne(record);
+  } else {
+    await store.update(document => {
+      const revokedCutoff = Date.now() - REVOKED_RETENTION_MS;
+      document.connections = document.connections.filter(item => !item.revokedAt || Date.parse(item.revokedAt) >= revokedCutoff);
+      const activeCount = document.connections.filter(item => item.userId === userId && item.enabled).length;
+      if (activeCount >= MAX_ACTIVE_CONNECTIONS_PER_USER) {
+        throw new ValidationError(`A Quicker Portal account can have at most ${MAX_ACTIVE_CONNECTIONS_PER_USER} active MCP connections. Revoke an unused connection first.`);
+      }
+      document.connections.push(record);
+      return { result: record };
+    });
+  }
   const endpoint = mcpConnectionEndpoint(endpointBase, record);
   return {
     connection: publicConnection(record),
@@ -89,6 +102,10 @@ export async function createMcpConnection(userId, input, endpointBase) {
 }
 
 export async function listMcpConnections(userId) {
+  if (mongoEnabled()) {
+    const rows = await (await mongoCollection('mcp_connections')).find({ userId, kind: { $ne: 'ide' } }).sort({ createdAt: -1 }).toArray();
+    return rows.map(publicConnection);
+  }
   const document = await store.read();
   return document.connections.filter(item => item.userId === userId && item.kind !== 'ide').map(publicConnection);
 }
@@ -99,6 +116,35 @@ export async function listMcpConnections(userId) {
  * QP OAuth and the desktop bridge must present a live QP product session.
  */
 export async function ensureIdeMcpConnection(userId) {
+  const now = new Date().toISOString();
+  if (mongoEnabled()) {
+    const collection = await mongoCollection('mcp_connections');
+    const updated = await collection.findOneAndUpdate(
+      { userId, kind: 'ide' },
+      {
+        $set: { enabled: true, revokedAt: null },
+        $setOnInsert: {
+          id: randomId('ide'),
+          kind: 'ide',
+          userId,
+          tenantId: 'ide',
+          tenantKey: 'ide',
+          tenantName: 'Quicker Portal IDE',
+          environmentId: 'ide',
+          environmentKey: 'ide',
+          environmentName: 'Local workspaces',
+          name: 'Quicker Portal IDE',
+          captureMode: 'metadata',
+          keyHash: null,
+          keyPrefix: null,
+          createdAt: now,
+          lastUsedAt: null
+        }
+      },
+      { upsert: true, returnDocument: 'after' }
+    );
+    return publicConnection(updated);
+  }
   return store.update(document => {
     const existing = document.connections.find(item => item.userId === userId && item.kind === 'ide');
     if (existing) {
@@ -106,14 +152,15 @@ export async function ensureIdeMcpConnection(userId) {
       existing.revokedAt = null;
       return { result: publicConnection(existing) };
     }
-    const now = new Date().toISOString();
     const connection = {
       id: randomId('ide'),
       kind: 'ide',
       userId,
       tenantId: 'ide',
+      tenantKey: 'ide',
       tenantName: 'Quicker Portal IDE',
       environmentId: 'ide',
+      environmentKey: 'ide',
       environmentName: 'Local workspaces',
       name: 'Quicker Portal IDE',
       captureMode: 'metadata',
@@ -140,11 +187,25 @@ export function mcpConnectionEndpoint(endpointBase, connection) {
 }
 
 export async function findMcpConnectionById(connectionId) {
+  if (mongoEnabled()) {
+    const document = await (await mongoCollection('mcp_connections')).findOne({ id: connectionId });
+    if (!document) return null;
+    const { _id, ...connection } = document;
+    return connection;
+  }
   const document = await store.read();
   return document.connections.find(item => item.id === connectionId) || null;
 }
 
 export async function activeMcpConnectionsForResource({ userId, tenantId }) {
+  if (mongoEnabled()) {
+    const rows = await (await mongoCollection('mcp_connections')).find({
+      userId,
+      tenantKey: String(tenantId).toLowerCase(),
+      enabled: true
+    }).toArray();
+    return rows.map(({ _id, ...value }) => value);
+  }
   const document = await store.read();
   return document.connections.filter(item => (
     item.enabled
@@ -154,6 +215,15 @@ export async function activeMcpConnectionsForResource({ userId, tenantId }) {
 }
 
 export async function revokeMcpConnection(userId, connectionId) {
+  if (mongoEnabled()) {
+    const updated = await (await mongoCollection('mcp_connections')).findOneAndUpdate(
+      { id: connectionId, userId },
+      { $set: { enabled: false, revokedAt: new Date().toISOString() } },
+      { returnDocument: 'after' }
+    );
+    if (!updated) throw new NotFoundError('MCP connection not found.');
+    return publicConnection(updated);
+  }
   let updated;
   await store.update(document => {
     const connection = document.connections.find(item => item.id === connectionId && item.userId === userId);
@@ -173,19 +243,24 @@ export async function authenticateMcpConnection({ userId, tenantId, authorizatio
   if (!token || token.length > 512) throw new AuthenticationError('Provide the MCP bearer key.', 'MCP_KEY_REQUIRED');
   const parts = token.split('.');
   if (parts.length !== 3 || parts[0] !== 'qpmcp') throw new AuthenticationError('MCP bearer key is invalid.', 'MCP_KEY_INVALID');
-  const document = await store.read();
-  const connection = document.connections.find(item => item.id === parts[1]);
+  const connection = mongoEnabled()
+    ? await (await mongoCollection('mcp_connections')).findOne({ id: parts[1] })
+    : (await store.read()).connections.find(item => item.id === parts[1]);
   if (!connection || !connection.enabled || connection.userId !== userId || connection.tenantId.toLowerCase() !== String(tenantId).toLowerCase()) {
     throw new AuthenticationError('MCP bearer key is invalid or revoked.', 'MCP_KEY_INVALID');
   }
   if (!safeEqual(connection.keyHash, sha256Hex(token))) throw new AuthenticationError('MCP bearer key is invalid.', 'MCP_KEY_INVALID');
   const now = new Date().toISOString();
   if (!connection.lastUsedAt || Date.now() - Date.parse(connection.lastUsedAt) > 60_000) {
-    store.update(current => {
-      const found = current.connections.find(item => item.id === connection.id);
-      if (found) found.lastUsedAt = now;
-      return {};
-    }).catch(() => {});
+    if (mongoEnabled()) {
+      void mongoCollection('mcp_connections').then(collection => collection.updateOne({ id: connection.id }, { $set: { lastUsedAt: now } })).catch(() => {});
+    } else {
+      store.update(current => {
+        const found = current.connections.find(item => item.id === connection.id);
+        if (found) found.lastUsedAt = now;
+        return {};
+      }).catch(() => {});
+    }
   }
   return { ...connection, lastUsedAt: now };
 }

@@ -12,8 +12,9 @@ Express, WebSocket, Zod, and gitignore parsing. Tests use Node's built-in
 npm start
 ```
 
-The service listens on `http://127.0.0.1:4817` by default and creates its data
-directory on first boot.
+The service listens on `http://127.0.0.1:4817` by default. Local development
+uses the existing filesystem adapter; production uses MongoDB Atlas whenever
+`MONGODB_URI` is configured.
 
 Run the tests:
 
@@ -38,9 +39,10 @@ src/
       authenticate.js         bearer verification + session liveness check
   lib/
     crypto.js                 scrypt hashing, HMAC, constant-time compare
-    key-store.js              signing key generation, persistence, rotation
+    key-store.js              signing key generation, secret/Mongo persistence
+    mongo.js                  Atlas pool, transactions, indexes, TTL setup
     tokens.js                 signed access tokens (HS256, algorithm pinned)
-    json-store.js             atomic crash-safe JSON persistence
+    json-store.js             local/test crash-safe persistence fallback
     validation.js             input normalization and policy
   modules/
     auth/auth-service.js      signup, verify, login, refresh, logout, password
@@ -60,27 +62,32 @@ src/
 
 ### Data layout
 
-All state lives under `data/` (owner-only `0700` directories, `0600` files):
+With `MONGODB_URI` configured, persistent application state is normalized into
+MongoDB collections rather than stored as shared JSON blobs:
 
 ```
-data/
-  users/users.json            user records + email/username indexes
-  users/pending-signups.json  unverified signups (no user row exists yet)
-  plans/subscriptions.json    subscription + plan state, kept separate from identity
-  sessions/sessions.json      refresh sessions (hashes only, never raw tokens)
-  keys/signing-keys.json      HMAC signing keys
-  audit/security-events.jsonl append-only audit trail
-  mcp/connections.json        MCP connection metadata + bearer-key hashes
-  mcp/oauth-clients.json      dynamically registered public OAuth clients
-  mcp/oauth-authorizations.json short-lived authorization + CSRF records
-  mcp/oauth-tokens.json       authorization-code and rotating-token hashes
-  mcp/jobs.json               short-lived desktop execution queue
-  mcp/transmissions.jsonl     append-only redacted transmission history
-  outbox/*.eml                sent mail when using the outbox transport
+users                  product identity + password hashes
+pending_signups        short-lived verification state (TTL)
+sessions               rotating refresh-token families
+subscriptions          authoritative plan state
+mcp_connections        Power Platform + IDE MCP resources
+mcp_jobs               durable desktop execution queue (terminal TTL)
+oauth_clients          dynamically registered public OAuth clients
+oauth_authorizations   short-lived authorization + CSRF state (TTL)
+oauth_codes            one-time authorization codes (TTL)
+oauth_grants           rotating OAuth access/refresh token hashes
+audit_events           security audit trail
+mcp_transmissions      redacted MCP transmission analytics
+server_secrets         generated signing-key set when QP_SIGNING_SECRET is absent
 ```
 
-Writes are atomic: temp file, `fsync`, then `rename`. A per-file promise chain
-serializes read-modify-write cycles so concurrent requests cannot interleave.
+Unique indexes protect user identifiers and resource IDs, TTL indexes clean up
+short-lived records, and security-sensitive state changes use atomic updates or
+MongoDB transactions where multiple documents must change together.
+
+When MongoDB is not configured, local development and tests retain the original
+`data/` JSON/JSONL adapter. The mail `outbox` transport also remains filesystem
+based because it is a development transport, not application state.
 
 ## Security properties
 
@@ -113,8 +120,10 @@ exponential account lockout after repeated failures.
 **Entitlements.** Derived from the subscription store, never from client input.
 `/api/auth/me` recomputes them from storage rather than trusting token claims.
 
-**Auditing.** Every security-relevant event is appended to
-`data/audit/security-events.jsonl`. Secrets are redacted from logs by field name.
+**Auditing.** Every security-relevant event is persisted to the MongoDB
+`audit_events` collection in Atlas mode (or append-only JSONL locally). Secrets
+are never deliberately included in the audit payloads, and operational logging
+continues to apply field-name redaction.
 
 ## API
 
@@ -198,7 +207,11 @@ Every value has a safe default; override with environment variables.
 |---|---|---|
 | `QP_BACKEND_HOST` | `127.0.0.1` | Bind address |
 | `QP_BACKEND_PORT` | `4817` | Port |
-| `QP_BACKEND_DATA_DIR` | `./data` | State directory. **Must point at a mounted disk on any managed host** — see the deployment section. |
+| `MONGODB_URI` | unset | MongoDB Atlas connection URI. When set, MongoDB becomes authoritative persistent storage. |
+| `MONGODB_DB_NAME` | `quicker_portal` | Atlas database name. |
+| `MONGODB_MAX_POOL_SIZE` | `10` | Maximum MongoDB connection-pool size per backend process. |
+| `QP_SIGNING_SECRET` | unset | Optional deployment secret used to derive the token-signing key; otherwise the generated key set is stored in MongoDB. |
+| `QP_BACKEND_DATA_DIR` | `./data` | Filesystem fallback for local development/tests and the development mail outbox. |
 | `QP_BACKEND_ALLOWED_ORIGINS` | localhost:5817 | CORS allow-list |
 | `QP_BACKEND_TRUST_PROXY` | unset | Set to `1` only behind a trusted proxy |
 | `QP_ACCESS_TOKEN_TTL_SECONDS` | `900` | Access token lifetime |
@@ -254,62 +267,69 @@ The default `outbox` transport writes each message as a `.eml` file under
 grep -h "code is" data/outbox/*.eml | tail -1
 ```
 
-## Deployment: the data directory must be a real disk
+## Deployment: MongoDB Atlas persistence
 
-**This is the single most important thing about running this service.**
+Managed hosts such as Render provide ephemeral container filesystems. Production
+therefore uses MongoDB Atlas whenever `MONGODB_URI` is configured; the local
+filesystem is not the source of truth for product accounts, sessions, MCP state,
+or analytics.
 
-Every user record, password hash, refresh session, token signing key, and MCP
-connection is a JSON file under `QP_BACKEND_DATA_DIR`. Managed hosts (Render,
-Heroku, Cloud Run, App Service, Fly) give a container an *ephemeral*
-filesystem: it is recreated on every deploy, every restart, and every wake from
-idle. `data/` is deliberately gitignored, so a deploy never carries state with
-it either.
-
-Without a mounted disk the result is total, silent data loss:
+Without MongoDB or an explicitly persistent fallback disk, the result is silent
+data loss:
 
 - Signup succeeds, and the account works for as long as the instance stays up.
 - The instance restarts, redeploys, or idles out.
-- The same credentials are now rejected — the account no longer exists.
-- MCP OAuth stops authorizing, because both the connection records and the
-  signing keys that validate its tokens went with it.
+- If MongoDB Atlas is not configured and the filesystem is ephemeral, the same
+  credentials are now rejected because the account no longer exists.
+- MCP OAuth can also stop authorizing if its connection records/signing keys
+  were stored only on that ephemeral filesystem.
 
-Nothing in the API surface looks wrong while this happens, which is what makes
-it expensive to diagnose. So the service now says it plainly:
+The production configuration now uses MongoDB Atlas whenever `MONGODB_URI` is
+present. Check the active storage mode at:
 
 ```bash
 curl https://your-host/api/health
 ```
 
+A healthy Atlas-backed response contains:
+
 ```json
 {
   "ok": true,
   "storage": {
-    "persistent": false,
-    "accounts": "present",
-    "warning": "Accounts are stored on an ephemeral filesystem and will be lost on the next restart. Mount a disk and set QP_BACKEND_DATA_DIR to it."
+    "mode": "mongodb",
+    "persistent": true,
+    "database": "quicker_portal",
+    "accounts": "present"
   }
 }
 ```
 
-`"persistent": false` means the next restart wipes every account. The same
-condition is logged at `error` level on boot.
-
-`render.yaml` in this repository declares the disk and points
-`QP_BACKEND_DATA_DIR` at its mount:
+`render.yaml` declares the required secret URI without embedding credentials:
 
 ```yaml
-disk:
-  name: qp-backend-data
-  mountPath: /var/data
-  sizeGB: 1
 envVars:
-  - key: QP_BACKEND_DATA_DIR
-    value: /var/data
+  - key: MONGODB_URI
+    sync: false
+  - key: MONGODB_DB_NAME
+    value: quicker_portal
+  - key: QP_SIGNING_SECRET
+    sync: false
 ```
 
-Mounting a disk on Render requires a paid instance type. On a free instance the
-service loses its data on every spin-down regardless of configuration — there
-is no setting that avoids this, only a database or a disk.
+`QP_SIGNING_SECRET` is optional. When omitted, Quicker Portal creates a random
+256-bit signing key once and stores the key set in MongoDB. Supplying the secret
+keeps token signing independent of the database and is recommended for stricter
+production separation.
+
+If an older deployment already has JSON data, configure Atlas and run:
+
+```bash
+npm run migrate:mongo
+```
+
+The migration is idempotent: stable IDs are upserted, JSONL history gets stable
+migration keys, and rerunning it does not duplicate records.
 
 ## Production notes
 
@@ -322,20 +342,20 @@ Deliberate scope boundaries, and what to do before going live:
   plain HTTP; run it behind a reverse proxy that handles certificates. Only set
   `QP_BACKEND_TRUST_PROXY=1` when a trusted proxy actually sets
   `X-Forwarded-For`, otherwise clients can spoof their rate-limit identity.
-- **Keep MCP OAuth state on durable storage.** OAuth clients, grants, connection
-  records, signing keys, and product accounts currently use `QP_BACKEND_DATA_DIR`.
-  Render's default filesystem is ephemeral, so attach a persistent disk and set
-  this directory to its mount path, or replace the JSON repositories with a
-  transactional database before production. A restart without durable storage
-  invalidates active ChatGPT connections and can also lose product accounts.
-- **Rate-limit counters are per-process.** Running multiple instances needs a
-  shared store; the interface in `rate-limit.js` is the seam.
-- **Back up `data/keys/signing-keys.json`.** Losing it invalidates every issued
-  token (users simply sign in again). Leaking it lets an attacker mint valid
-  tokens — treat it as a secret and rotate by adding a new key and switching
-  `activeKid`.
-- **The JSON stores suit single-node deployments.** The repository interfaces
-  (`user-repo.js`, `session-store.js`, `subscription-store.js`) are the seam to
-  swap in a database without touching business logic.
-- **The MCP broker is single-node.** Desktop heartbeats are in memory and jobs use the local JSON store. Multi-instance deployment needs a shared transactional queue, distributed leases, and a shared analytics store.
+- **Keep `MONGODB_URI` secret.** It grants database access and must be configured
+  through the hosting provider's secret environment, never committed to source.
+- **Prefer `QP_SIGNING_SECRET` for production key separation.** The fallback
+  Mongo-backed key set is durable, but a dedicated deployment secret prevents a
+  database credential alone from exposing the token-signing key.
+- **Rate-limit counters are still per-process.** Running many HTTP instances
+  behind one origin should move rate-limit counters to a shared store.
+- **Desktop heartbeats are intentionally in memory.** Durable MCP jobs are now
+  shared through MongoDB, but a desktop heartbeat reflects a live connection to
+  one backend process; use sticky routing or a shared presence layer before
+  horizontally scaling the long-lived desktop bridge.
+- **Back up Atlas.** Users, pending signups, sessions, subscriptions, MCP
+  connections/jobs, OAuth state, audit events, and transmission analytics are
+  stored in normalized collections with indexes and TTL cleanup where
+  appropriate.
+
 - **Detailed MCP analytics retain business payloads.** Credential-like keys are redacted and oversized strings are truncated, but ordinary Dataverse field values are retained by design. Apply retention/deletion policy and encryption at rest, or require metadata-only capture.

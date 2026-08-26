@@ -23,7 +23,6 @@ import {
 } from '../../lib/crypto.js';
 import { activeSigningKey } from '../../lib/key-store.js';
 import { issueAccessToken } from '../../lib/tokens.js';
-import { JsonStore } from '../../lib/json-store.js';
 import {
   createUser,
   emailInUse,
@@ -43,8 +42,7 @@ import { ensureSubscription, entitlementsForUser } from '../plans/subscription-s
 import { DEFAULT_PLAN_ID, planById } from '../plans/plan-catalog.js';
 import { sendMail, verificationEmail } from '../mail/mailer.js';
 import { audit } from '../audit/audit.js';
-
-const pendingStore = new JsonStore('users/pending-signups.json', { pending: {} });
+import { mutatePendingSignup, replacePendingSignup } from './pending-signup-store.js';
 
 // A fixed dummy hash so login timing is identical whether or not the
 // identifier exists (prevents user enumeration through response timing).
@@ -120,26 +118,19 @@ export async function startSignup({ name, username, email, password, planId, ip 
   const pendingId = randomId('pnd');
   const code = issueVerificationCode();
 
-  await pendingStore.update(db => {
-    // One live pending signup per email — restarting signup invalidates
-    // earlier codes for that address.
-    for (const [key, entry] of Object.entries(db.pending)) {
-      if (entry.email === email || entry.expiresAt <= nowSeconds()) delete db.pending[key];
-    }
-    db.pending[pendingId] = {
-      id: pendingId,
-      name,
-      username,
-      email,
-      passwordHash,
-      planId: requestedPlan,
-      codeHash: codeDigest(pendingId, code),
-      expiresAt: nowSeconds() + config.verification.ttlSeconds,
-      attempts: 0,
-      resends: 0,
-      lastSentAt: nowSeconds(),
-      createdIp: ip || ''
-    };
+  await replacePendingSignup({
+    id: pendingId,
+    name,
+    username,
+    email,
+    passwordHash,
+    planId: requestedPlan,
+    codeHash: codeDigest(pendingId, code),
+    expiresAt: nowSeconds() + config.verification.ttlSeconds,
+    attempts: 0,
+    resends: 0,
+    lastSentAt: nowSeconds(),
+    createdIp: ip || ''
   });
 
   // STATIC CODE: email delivery is commented out. Uncomment this line — or
@@ -160,17 +151,16 @@ export async function startSignup({ name, username, email, password, planId, ip 
 
 export async function resendSignupCode({ pendingId, ip }) {
   const code = issueVerificationCode();
-  const entry = await pendingStore.update(db => {
-    const pending = db.pending[pendingId];
-    if (!pending || pending.expiresAt <= nowSeconds()) return { result: null };
-    if (pending.resends >= config.verification.maxResends) return { result: { blocked: 'max_resends' } };
-    if (nowSeconds() - pending.lastSentAt < config.verification.resendCooldownSeconds) return { result: { blocked: 'cooldown' } };
+  const entry = await mutatePendingSignup(pendingId, pending => {
+    if (!pending || pending.expiresAt <= nowSeconds()) return { result: null, delete: Boolean(pending) };
+    if (pending.resends >= config.verification.maxResends) return { result: { blocked: 'max_resends' }, value: pending };
+    if (nowSeconds() - pending.lastSentAt < config.verification.resendCooldownSeconds) return { result: { blocked: 'cooldown' }, value: pending };
     pending.resends += 1;
     pending.lastSentAt = nowSeconds();
     pending.attempts = 0;
     pending.codeHash = codeDigest(pendingId, code);
     pending.expiresAt = nowSeconds() + config.verification.ttlSeconds;
-    return { result: { pending } };
+    return { result: { pending }, value: pending };
   });
 
   if (!entry) throw new ValidationError('This signup session has expired. Start over.');
@@ -191,21 +181,21 @@ export async function resendSignupCode({ pendingId, ip }) {
 }
 
 export async function verifySignup({ pendingId, code, ip, userAgent }) {
-  const verdict = await pendingStore.update(db => {
-    const pending = db.pending[pendingId];
-    if (!pending || pending.expiresAt <= nowSeconds()) return { result: { status: 'expired' } };
+  const verdict = await mutatePendingSignup(pendingId, pending => {
+    if (!pending || pending.expiresAt <= nowSeconds()) return { result: { status: 'expired' }, delete: Boolean(pending) };
     if (pending.attempts >= config.verification.maxAttempts) {
-      delete db.pending[pendingId];
-      return { result: { status: 'too_many_attempts' } };
+      return { result: { status: 'too_many_attempts' }, delete: true };
     }
     const expected = Buffer.from(pending.codeHash, 'hex');
     const provided = Buffer.from(codeDigest(pendingId, code), 'hex');
     if (expected.length !== provided.length || !timingSafeEqual(expected, provided)) {
       pending.attempts += 1;
-      return { result: { status: 'wrong_code', attemptsLeft: config.verification.maxAttempts - pending.attempts } };
+      return {
+        result: { status: 'wrong_code', attemptsLeft: config.verification.maxAttempts - pending.attempts },
+        value: pending
+      };
     }
-    delete db.pending[pendingId];
-    return { result: { status: 'ok', pending } };
+    return { result: { status: 'ok', pending }, delete: true };
   });
 
   if (verdict.status === 'expired') throw new ValidationError('This signup session has expired. Start over.');
