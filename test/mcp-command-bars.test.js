@@ -59,9 +59,10 @@ test('tool discovery metadata remains within its regression budget', () => {
   const advertised = MCP_TOOLS.map(publicTool);
   const totalBytes = Buffer.byteLength(JSON.stringify({ tools: advertised }));
   const largest = Math.max(...advertised.map(item => Buffer.byteLength(JSON.stringify(item))));
-  // Discovery is byte-paginated by protocol.js at 48 KiB. The aggregate
-  // ceiling still catches accidental schema explosions while allowing the
-  // targeted flow/form/view/web-resource mutation contracts.
-  assert.ok(totalBytes < 96 * 1024, `MCP catalog regressed to ${totalBytes} bytes.`);
+  // Discovery is byte-paginated by protocol.js at 48 KiB. The aggregate and
+  // per-tool-density ceilings still catch schema explosions while allowing
+  // purpose-specific Canvas live-authoring tools to remain discoverable.
+  assert.ok(totalBytes < 108 * 1024, `MCP catalog regressed to ${totalBytes} bytes.`);
+  assert.ok(totalBytes / advertised.length < 1_000, `Average MCP descriptor regressed to ${Math.ceil(totalBytes / advertised.length)} bytes.`);
   assert.ok(largest < 8 * 1024, `An individual MCP tool descriptor regressed to ${largest} bytes.`);
 });

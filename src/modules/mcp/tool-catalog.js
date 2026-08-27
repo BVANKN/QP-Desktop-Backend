@@ -56,6 +56,19 @@ const anchoredTextEdit = object({
   expectedOccurrences: number('Exact number of anchors that must match before replacement.', { minimum: 1 })
 });
 const revision = string('Optional SHA-256 revision returned by the corresponding read tool. If supplied, a stale write is rejected.');
+// Canvas authoring has many small, purpose-specific tools. Keep their repeated
+// fields compact so the paged tools/list response stays inexpensive without
+// sacrificing the operation-specific guidance models need.
+const canvasAppId = string('Canvas app GUID.');
+const canvasPath = string('Relative .pa.yaml source path.');
+const canvasContext = { appId: canvasAppId };
+const canvasAnchoredEdit = object({
+  mode: { type: 'string', enum: ['replace', 'append', 'prepend'] },
+  oldText: string('Exact current anchor for replace.'),
+  newText: string('Replacement text.'),
+  text: string('Text for append/prepend.'),
+  expectedOccurrences: number('Required anchor count.', { minimum: 1 })
+});
 const commandSurface = { type: 'string', enum: ['mainGrid', 'mainForm', 'subgrid', 'associated'], description: 'Supported model-driven app command-bar surface.' };
 const commandParameter = object({
   type: { type: 'string', enum: ['CrmParameter', 'StringParameter', 'BoolParameter', 'IntParameter', 'DecimalParameter'], description: 'Ribbon command parameter element type.' },
@@ -158,6 +171,24 @@ export const MCP_TOOLS = Object.freeze([
   tool('publish_view', 'publishComponentDesigner', 'Publish the table customizations containing a system view.', object({ id: string('Saved query GUID.'), target: tableName, confirm: boolean('Confirm publishing this view.') }, ['id', 'confirm']), { readOnly: false, idempotent: true, fixedArguments: { kind: 'views' } }),
   tool('list_canvas_apps', 'developerAssets', 'List Canvas apps available through Dataverse metadata.', object(), { fixedArguments: { kind: 'canvasApps' } }),
   tool('get_canvas_app', 'developerAssetDetail', 'Get Canvas app metadata and related component details.', object({ id: string('Canvas app GUID.') }, ['id']), { fixedArguments: { kind: 'canvasApps' } }),
+  tool('get_canvas_authoring_status', 'canvasAuthoringStatus', 'Get Canvas prerequisites, connection, baseline, pending changes, and operations.', object({ ...canvasContext, appName: string('Optional display name.') }, ['appId'])),
+  tool('connect_canvas_authoring', 'canvasAuthoringStartConnect', 'Connect in the background to this app open in coauthoring-enabled Studio. Returns an operation ID to poll.', object({ ...canvasContext, appName: string('Optional display name.') }, ['appId']), { readOnly: false, timeoutMs: 55_000 }),
+  tool('sync_canvas_authoring_source', 'canvasAuthoringStartSync', 'Sync authoritative live source before reads or edits. Returns an operation ID to poll.', object({ ...canvasContext, appName: string('Optional display name.') }, ['appId']), { timeoutMs: 55_000 }),
+  tool('get_canvas_authoring_operation', 'canvasAuthoringOperation', 'Get progress/result for a Canvas operation.', object({ ...canvasContext, operationId: string('Start-operation ID; omit for latest.') }, ['appId'])),
+  tool('list_canvas_source_files', 'canvasAuthoringFiles', 'List synchronized .pa.yaml files, revisions, sizes, and change states.', object(canvasContext, ['appId'])),
+  tool('read_canvas_source_file', 'canvasAuthoringReadFile', 'Read current Canvas YAML and its write revision (maximum 2,000 lines).', object({ ...canvasContext, path: canvasPath, startLine: number('First line.', { minimum: 1 }), endLine: number('Inclusive last line.', { minimum: 1 }) }, ['appId', 'path'])),
+  tool('search_canvas_source', 'canvasAuthoringSearch', 'Search current Canvas YAML before editing.', object({ ...canvasContext, query: string('Text or regex.'), isRegex: boolean('Regex mode.'), caseSensitive: boolean('Case-sensitive mode.'), maxResults: number('1–500 matches.', { minimum: 1, maximum: 500 }) }, ['appId', 'query'])),
+  tool('patch_canvas_source_file', 'canvasAuthoringPatchFile', 'Preferred targeted Canvas editor with stale-revision protection. Never ask the user for the whole app. Use create=true and revision "new" only for a new .pa.yaml file.', object({ ...canvasContext, path: canvasPath, expectedRevision: string('Latest read revision, or "new".'), create: boolean('Create a missing file.'), edits: array(canvasAnchoredEdit, 'Ordered exact edits.', { minItems: 1, maxItems: 128 }) }, ['appId', 'path', 'expectedRevision', 'edits']), { readOnly: false, idempotent: true, timeoutMs: 55_000 }),
+  tool('delete_canvas_source_file', 'canvasAuthoringDeleteFile', 'Delete one current-revision .pa.yaml file; _EditorState is protected.', object({ ...canvasContext, path: canvasPath, expectedRevision: string('Latest read revision.'), confirm }, ['appId', 'path', 'expectedRevision', 'confirm']), { readOnly: false, destructive: true, timeoutMs: 55_000 }),
+  tool('get_canvas_pending_diff', 'canvasAuthoringDiff', 'Summarize pending source changes; path adds exact before/after source.', object({ ...canvasContext, path: canvasPath }, ['appId'])),
+  tool('apply_canvas_authoring_changes', 'canvasAuthoringStartCompile', 'Validate, apply, and canonical re-sync in the background. Returns an operation ID; success requires result.verified=true.', object(canvasContext, ['appId']), { readOnly: false, timeoutMs: 55_000 }),
+  tool('discard_canvas_pending_changes', 'canvasAuthoringDiscard', 'Restore the synchronized local baseline without changing the live app.', object({ ...canvasContext, confirm }, ['appId', 'confirm']), { readOnly: false, destructive: true, timeoutMs: 55_000 }),
+  tool('list_canvas_controls', 'canvasAuthoringDiscovery', 'List current Microsoft Canvas controls.', object(canvasContext, ['appId']), { fixedArguments: { toolName: 'list_controls' } }),
+  tool('describe_canvas_control', 'canvasAuthoringDiscovery', 'Describe one listed Canvas control.', object({ ...canvasContext, name: string('Exact control name.') }, ['appId', 'name']), { fixedArguments: { toolName: 'describe_control' } }),
+  tool('list_canvas_apis', 'canvasAuthoringDiscovery', 'List current Canvas APIs/connectors.', object(canvasContext, ['appId']), { fixedArguments: { toolName: 'list_apis' } }),
+  tool('describe_canvas_api', 'canvasAuthoringDiscovery', 'Describe one listed Canvas API.', object({ ...canvasContext, name: string('Exact API name.') }, ['appId', 'name']), { fixedArguments: { toolName: 'describe_api' } }),
+  tool('list_canvas_data_sources', 'canvasAuthoringDiscovery', 'List the live app data sources.', object(canvasContext, ['appId']), { fixedArguments: { toolName: 'list_data_sources' } }),
+  tool('get_canvas_data_source_schema', 'canvasAuthoringDiscovery', 'Get one listed data-source schema.', object({ ...canvasContext, name: string('Exact data-source name.') }, ['appId', 'name']), { fixedArguments: { toolName: 'get_data_source_schema' } }),
 
   tool('query_records', 'mcpQueryRecords', 'Read Dataverse rows with bounded OData query options. Use select to minimize transmitted data.', object({
     tableLogicalName: tableName,
