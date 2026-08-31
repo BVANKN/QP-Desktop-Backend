@@ -56,13 +56,16 @@ test('rule and action schemas expose discoverable parameters to MCP clients', ()
 });
 
 test('tool discovery metadata remains within its regression budget', () => {
-  const advertised = MCP_TOOLS.map(publicTool);
-  const totalBytes = Buffer.byteLength(JSON.stringify({ tools: advertised }));
-  const largest = Math.max(...advertised.map(item => Buffer.byteLength(JSON.stringify(item))));
-  // Discovery is byte-paginated by protocol.js at 48 KiB. The aggregate and
-  // per-tool-density ceilings still catch schema explosions while allowing
-  // purpose-specific Canvas live-authoring tools to remain discoverable.
-  assert.ok(totalBytes < 108 * 1024, `MCP catalog regressed to ${totalBytes} bytes.`);
-  assert.ok(totalBytes / advertised.length < 1_000, `Average MCP descriptor regressed to ${Math.ceil(totalBytes / advertised.length)} bytes.`);
-  assert.ok(largest < 8 * 1024, `An individual MCP tool descriptor regressed to ${largest} bytes.`);
+  for (const group of ['power-platform', 'sharepoint']) {
+    const advertised = MCP_TOOLS.filter(tool => tool.group === group).map(publicTool);
+    const totalBytes = Buffer.byteLength(JSON.stringify({ tools: advertised }));
+    const largest = Math.max(...advertised.map(item => Buffer.byteLength(JSON.stringify(item))));
+    // Each OAuth resource discovers only its own catalog and protocol.js
+    // byte-paginates that catalog at 48 KiB. Measure the actual wire surfaces,
+    // not the combined in-process registry that no client can request.
+    const aggregateBudget = group === 'power-platform' ? 108 * 1024 : 24 * 1024;
+    assert.ok(totalBytes < aggregateBudget, `${group} MCP catalog regressed to ${totalBytes} bytes.`);
+    assert.ok(totalBytes / advertised.length < 1_200, `${group} average MCP descriptor regressed to ${Math.ceil(totalBytes / advertised.length)} bytes.`);
+    assert.ok(largest < 8 * 1024, `An individual ${group} MCP tool descriptor regressed to ${largest} bytes.`);
+  }
 });

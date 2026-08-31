@@ -90,18 +90,20 @@ function normalizeResource(value, serviceBaseUrl) {
   }
   const segments = resource.pathname.split('/').filter(Boolean).map(segment => decodeURIComponent(segment));
   const ideResource = segments.length === 3 && segments[0] === 'ide' && segments[1] === 'mcp';
+  const sharePointResource = segments.length === 3 && segments[0] === 'sharepoint' && segments[1] === 'mcp';
   const powerPlatformResource = segments.length >= 3 && segments[0] === 'mcp';
-  if (!ideResource && !powerPlatformResource) {
+  if (!ideResource && !sharePointResource && !powerPlatformResource) {
     throw new OAuthError('invalid_target', 'The MCP resource path is invalid.');
   }
-  const userId = cleanText(ideResource ? segments[2] : segments[1], 128);
-  const tenantId = cleanText(ideResource ? 'ide' : segments[2], 128);
+  const userId = cleanText(ideResource || sharePointResource ? segments[2] : segments[1], 128);
+  const tenantId = cleanText(ideResource ? 'ide' : sharePointResource ? 'sharepoint' : segments[2], 128);
   if (!userId || !tenantId) throw new OAuthError('invalid_target', 'The MCP resource scope is incomplete.');
   resource.searchParams.sort();
   return {
     resource: resource.toString(),
     userId,
     tenantId,
+    kind: ideResource ? 'ide' : sharePointResource ? 'sharepoint' : 'power-platform',
     connectionId: cleanText(resource.searchParams.get('connection_id'), 128)
   };
 }
@@ -174,7 +176,8 @@ async function findClient(clientId) {
 }
 
 async function resourceConnections(resourceInfo) {
-  const connections = await activeMcpConnectionsForResource(resourceInfo);
+  const connections = (await activeMcpConnectionsForResource(resourceInfo))
+    .filter(connection => (connection.kind || 'power-platform') === resourceInfo.kind);
   if (!connections.length) throw new OAuthError('access_denied', 'No active Quicker Portal MCP connection exists for this resource.', 403);
   if (!resourceInfo.connectionId) return connections;
   const selected = connections.find(item => item.id === resourceInfo.connectionId);
@@ -213,6 +216,7 @@ export async function beginAuthorization(params, serviceBaseUrl, requestContext 
     resource: resourceInfo.resource,
     resourceUserId: resourceInfo.userId,
     tenantId: resourceInfo.tenantId,
+    resourceKind: resourceInfo.kind,
     fixedConnectionId: resourceInfo.connectionId || null,
     eligibleConnectionIds: connections.map(item => item.id),
     scopes,
@@ -235,7 +239,8 @@ async function authorizationPageModel(record, csrf, knownClient, knownConnection
   const client = knownClient || await findClient(record.clientId);
   if (!client) throw new OAuthError('invalid_client', 'The OAuth client is no longer registered.', 401);
   const connections = knownConnections || (await activeMcpConnectionsForResource({ userId: record.resourceUserId, tenantId: record.tenantId }))
-    .filter(item => record.eligibleConnectionIds.includes(item.id));
+    .filter(item => record.eligibleConnectionIds.includes(item.id))
+    .filter(item => (item.kind || 'power-platform') === (record.resourceKind || 'power-platform'));
   if (!connections.length) throw new OAuthError('access_denied', 'No eligible MCP connection remains active.', 403);
   return { request: record, csrf, client, connections, retryPath: authorizationRetryPath(record) };
 }
@@ -298,7 +303,7 @@ export async function completeAuthorization(input, requestContext = {}) {
   const connectionId = request.fixedConnectionId || cleanText(input.connectionId, 128);
   if (!request.eligibleConnectionIds.includes(connectionId)) throw new OAuthError('access_denied', 'Select an eligible MCP connection.', 403);
   const connection = await findMcpConnectionById(connectionId);
-  if (!connection?.enabled || connection.userId !== request.resourceUserId || connection.tenantId.toLowerCase() !== request.tenantId.toLowerCase()) {
+  if (!connection?.enabled || connection.userId !== request.resourceUserId || connection.tenantId.toLowerCase() !== request.tenantId.toLowerCase() || (connection.kind || 'power-platform') !== (request.resourceKind || 'power-platform')) {
     throw new OAuthError('access_denied', 'The selected MCP connection is no longer active.', 403);
   }
 
@@ -539,12 +544,17 @@ function escapeHtml(value) {
 export function renderAuthorizationPage(model, { error = '', notice = '' } = {}) {
   const { request, csrf, client, connections, retryPath } = model;
   const ide = request.tenantId === 'ide';
+  const sharePoint = request.tenantId === 'sharepoint';
   const scopeLabels = {
     'mcp:read': ide
       ? 'Read files and project structure from workspaces you open in Quicker Portal IDE'
+      : sharePoint
+        ? 'Read sites, libraries, files, lists, columns, and list items from the SharePoint session connected on your desktop'
       : 'Read Power Platform metadata and records through your connected desktop',
     'mcp:write': ide
       ? 'Create, edit, move, and delete workspace files and request locally approved commands'
+      : sharePoint
+        ? 'Request locally approved SharePoint file and list changes with stale-write protection'
       : 'Request changes; Quicker Portal still asks for local approval',
     offline_access: 'Stay connected using rotating refresh tokens'
   };
@@ -555,17 +565,17 @@ export function renderAuthorizationPage(model, { error = '', notice = '' } = {})
     </label>`).join('');
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Authorize Quicker Portal MCP</title><style>
     *{box-sizing:border-box}body{margin:0;min-height:100vh;background:linear-gradient(135deg,#edf5ff,#f8f6fb 55%,#fff);color:#242424;font:14px/1.45 "Segoe UI",sans-serif;display:grid;place-items:center;padding:24px}.card{width:min(590px,100%);background:#fff;border:1px solid #ddd;border-radius:8px;box-shadow:0 16px 50px #18395d20;overflow:hidden}.head{padding:24px 28px 18px;border-bottom:1px solid #e5e5e5}.brand{display:flex;align-items:center;gap:10px;color:#0f6cbd;font-weight:600}.mark{width:30px;height:30px;border-radius:5px;background:#0f6cbd;color:#fff;display:grid;place-items:center}.head h1{font-size:24px;font-weight:600;margin:18px 0 4px}.head p{margin:0;color:#616161}.body{padding:22px 28px}.client{background:#f5f9fd;border-left:3px solid #0f6cbd;padding:12px 14px;margin-bottom:18px}.client strong,.client span{display:block}.client span{font-size:12px;color:#616161;margin-top:2px}.error,.notice{padding:10px 12px;margin-bottom:16px;border-left:3px solid}.error{background:#fde7e9;color:#a4262c;border-color:#c50f1f}.notice{background:#e5f1fb;color:#174a75;border-color:#0f6cbd}.field{display:grid;gap:6px;margin-top:13px}.field>span,.section-title{font-size:12px;font-weight:600}.field small{color:#616161}.field input{height:38px;border:1px solid #8a8886;padding:0 10px;font:inherit}.field input:focus{outline:2px solid #0f6cbd;outline-offset:-1px}.connections{display:grid;gap:7px;margin-top:8px}.connection-option{display:flex;gap:10px;align-items:center;border:1px solid #ddd;padding:10px 12px;cursor:pointer}.connection-option:has(input:checked){border-color:#0f6cbd;background:#f3f9fd}.connection-option span{display:grid}.connection-option small{color:#616161}.permissions{margin:8px 0 0;padding:0;list-style:none;display:grid;gap:7px}.permissions li{display:flex;gap:8px;color:#424242}.permissions li:before{content:'✓';color:#107c10;font-weight:700}.actions{display:flex;justify-content:flex-end;gap:8px;margin-top:22px}.actions button{min-height:36px;padding:0 16px;border:1px solid #8a8886;background:#fff;font:600 14px inherit;cursor:pointer}.actions .primary{background:#0f6cbd;border-color:#0f6cbd;color:#fff}.foot{font-size:11px;color:#616161;padding:13px 28px;background:#fafafa;border-top:1px solid #e5e5e5}@media(max-width:560px){body{padding:0}.card{border:0;border-radius:0;min-height:100vh}.head,.body{padding-left:20px;padding-right:20px}.actions{display:grid}.actions button{width:100%}}
-  </style></head><body><main class="card"><header class="head"><div class="brand"><span class="mark">QP</span>Quicker Portal</div><h1>${ide ? 'Connect your IDE workspaces' : 'Connect your Power Platform environment'}</h1><p>Sign in with your Premium Quicker Portal account and approve the access requested by ${escapeHtml(client.name)}.</p></header><section class="body">
+  </style></head><body><main class="card"><header class="head"><div class="brand"><span class="mark">QP</span>Quicker Portal</div><h1>${ide ? 'Connect your IDE workspaces' : sharePoint ? 'Connect your SharePoint workspace' : 'Connect your Power Platform environment'}</h1><p>Sign in with your Premium Quicker Portal account and approve the access requested by ${escapeHtml(client.name)}.</p></header><section class="body">
     ${notice ? `<div class="notice" role="status">${escapeHtml(notice)}</div>` : ''}
     ${error ? `<div class="error" role="alert">${escapeHtml(error)}</div>` : ''}
     <div class="client"><strong>${escapeHtml(client.name)}</strong><span>${escapeHtml(request.resource)}</span></div>
     <form method="post" action="/oauth/authorize"><input type="hidden" name="requestId" value="${escapeHtml(request.id)}"><input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><input type="hidden" name="retryPath" value="${escapeHtml(retryPath)}">
       <label class="field"><span>Quicker Portal user name or email</span><input name="identifier" autocomplete="username" maxlength="254" required autofocus><small>Use your Quicker Portal account, not your Microsoft work account.</small></label>
       <label class="field"><span>Password</span><input type="password" name="password" autocomplete="current-password" maxlength="${config.password.maxLength}" required></label>
-      <div class="field"><span class="section-title">${ide ? 'IDE workspace connection' : 'Environment connection'}</span><div class="connections">${connectionChoices}</div></div>
+      <div class="field"><span class="section-title">${ide ? 'IDE workspace connection' : sharePoint ? 'SharePoint desktop connection' : 'Environment connection'}</span><div class="connections">${connectionChoices}</div></div>
       <div class="field"><span class="section-title">Permissions requested</span><ul class="permissions">${request.scopes.map(scope => `<li>${escapeHtml(scopeLabels[scope] || scope)}</li>`).join('')}</ul></div>
       <div class="actions"><button name="decision" value="deny" formnovalidate>Cancel</button><button class="primary" name="decision" value="approve">Authorize</button></div>
-    </form></section><footer class="foot">${ide ? 'Local files stay on your desktop. OAuth tokens are limited to this QP account and IDE MCP resource.' : 'Your Microsoft credentials remain in the Quicker Portal desktop. OAuth tokens are limited to this MCP endpoint and selected connection.'}</footer></main></body></html>`;
+    </form></section><footer class="foot">${ide ? 'Local files stay on your desktop. OAuth tokens are limited to this QP account and IDE MCP resource.' : sharePoint ? 'Microsoft credentials, cookies, and SharePoint tokens stay in the Quicker Portal desktop browser session. No customer app registration is required.' : 'Your Microsoft credentials remain in the Quicker Portal desktop. OAuth tokens are limited to this MCP endpoint and selected connection.'}</footer></main></body></html>`;
 }
 
 export function oauthErrorBody(error) {

@@ -103,11 +103,11 @@ export async function createMcpConnection(userId, input, endpointBase) {
 
 export async function listMcpConnections(userId) {
   if (mongoEnabled()) {
-    const rows = await (await mongoCollection('mcp_connections')).find({ userId, kind: { $ne: 'ide' } }).sort({ createdAt: -1 }).toArray();
+    const rows = await (await mongoCollection('mcp_connections')).find({ userId, kind: { $nin: ['ide', 'sharepoint'] } }).sort({ createdAt: -1 }).toArray();
     return rows.map(publicConnection);
   }
   const document = await store.read();
-  return document.connections.filter(item => item.userId === userId && item.kind !== 'ide').map(publicConnection);
+  return document.connections.filter(item => item.userId === userId && !['ide', 'sharepoint'].includes(item.kind)).map(publicConnection);
 }
 
 /**
@@ -178,6 +178,56 @@ export async function ensureIdeMcpConnection(userId) {
 
 export function ideMcpConnectionEndpoint(endpointBase, userId) {
   return `${String(endpointBase).replace(/\/+$/, '')}/ide/mcp/${encodeURIComponent(userId)}`;
+}
+
+/**
+ * Creates the account's OAuth-only SharePoint resource. SharePoint credentials,
+ * cookies, and access tokens never pass through this service: operations are
+ * leased to the user's live Quicker Portal desktop browser session.
+ */
+export async function ensureSharePointMcpConnection(userId) {
+  const now = new Date().toISOString();
+  const defaults = {
+    kind: 'sharepoint',
+    userId,
+    tenantId: 'sharepoint',
+    tenantKey: 'sharepoint',
+    tenantName: 'Local Microsoft session',
+    environmentId: 'sharepoint',
+    environmentKey: 'sharepoint',
+    environmentName: 'Connected SharePoint site',
+    name: 'Quicker Portal SharePoint MCP',
+    captureMode: 'metadata',
+    enabled: true,
+    keyHash: null,
+    keyPrefix: null,
+    createdAt: now,
+    lastUsedAt: null,
+    revokedAt: null
+  };
+  if (mongoEnabled()) {
+    const updated = await (await mongoCollection('mcp_connections')).findOneAndUpdate(
+      { userId, kind: 'sharepoint' },
+      { $set: { enabled: true, revokedAt: null }, $setOnInsert: { id: randomId('spmcp'), ...defaults } },
+      { upsert: true, returnDocument: 'after' }
+    );
+    return publicConnection(updated);
+  }
+  return store.update(document => {
+    const existing = document.connections.find(item => item.userId === userId && item.kind === 'sharepoint');
+    if (existing) {
+      existing.enabled = true;
+      existing.revokedAt = null;
+      return { result: publicConnection(existing) };
+    }
+    const connection = { id: randomId('spmcp'), ...defaults };
+    document.connections.push(connection);
+    return { result: publicConnection(connection) };
+  });
+}
+
+export function sharePointMcpConnectionEndpoint(endpointBase, userId) {
+  return `${String(endpointBase).replace(/\/+$/, '')}/sharepoint/mcp/${encodeURIComponent(userId)}`;
 }
 
 export function mcpConnectionEndpoint(endpointBase, connection) {
@@ -265,16 +315,20 @@ export async function authenticateMcpConnection({ userId, tenantId, authorizatio
   return { ...connection, lastUsedAt: now };
 }
 
-export function mcpResourceMetadata(resourceUrl, serviceBaseUrl, { ide = false } = {}) {
+export function mcpResourceMetadata(resourceUrl, serviceBaseUrl, { kind = 'power-platform', ide = false } = {}) {
+  const resourceKind = ide ? 'ide' : kind;
+  const isIde = resourceKind === 'ide';
+  const isSharePoint = resourceKind === 'sharepoint';
   return {
     resource: resourceUrl,
-    resource_name: ide ? 'Quicker Portal IDE MCP' : 'Quicker Portal Power Platform MCP',
+    resource_name: isIde ? 'Quicker Portal IDE MCP' : isSharePoint ? 'Quicker Portal SharePoint MCP' : 'Quicker Portal Power Platform MCP',
     authorization_servers: [serviceBaseUrl.replace(/\/+$/, '')],
     scopes_supported: ['mcp:read', 'mcp:write', 'offline_access'],
     bearer_methods_supported: ['header'],
-    resource_documentation: `${serviceBaseUrl.replace(/\/+$/, '')}${ide ? '/api/ide/bootstrap' : '/api/mcp/connections'}`,
-    quicker_portal_authentication: ide
+    resource_documentation: `${serviceBaseUrl.replace(/\/+$/, '')}${isIde ? '/api/ide/bootstrap' : isSharePoint ? '/api/mcp/sharepoint/bootstrap' : '/api/mcp/connections'}`,
+    quicker_portal_authentication: isIde || isSharePoint
       ? 'oauth-2.1-pkce-with-premium-quicker-portal-account'
-      : 'oauth-2.1-pkce-or-tenant-scoped-static-bearer-key'
+      : 'oauth-2.1-pkce-or-tenant-scoped-static-bearer-key',
+    ...(isSharePoint ? { sharepoint_authentication: 'connected-quicker-portal-desktop-browser-session; no customer app registration required' } : {})
   };
 }

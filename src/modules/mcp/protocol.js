@@ -140,7 +140,7 @@ function resultContent(value) {
   return { content: [{ type: 'text', text }], structuredContent, isError: false };
 }
 
-async function executeTool(ctx, connection, tool, args, id) {
+async function executeTool(ctx, connection, tool, args, id, resourceKind = 'power-platform') {
   const validationErrors = validateSchema(tool.inputSchema, args);
   if (tool.annotations.destructiveHint && args?.confirm !== true) validationErrors.push('arguments.confirm must be true after explicit user approval.');
   if (validationErrors.length) return jsonRpcError(id, -32602, 'Invalid tool arguments.', { errors: validationErrors });
@@ -149,7 +149,9 @@ async function executeTool(ctx, connection, tool, args, id) {
   if (!desktop.connected) {
     const mismatch = desktop.environmentMatches === false;
     return jsonRpcError(id, -32002, 'Quicker Portal desktop is offline.', {
-      remediation: mismatch
+      remediation: resourceKind === 'sharepoint'
+        ? 'Open Quicker Portal, sign in with this Premium account, then connect the SharePoint site from SharePoint MCP. Keep the desktop app running while the AI works.'
+        : mismatch
         ? `The desktop is connected to ${desktop.environmentName || desktop.environmentId || 'another environment'}. Select the environment configured for this MCP connection and retry.`
         : 'Open Quicker Portal, sign in with this Quicker Portal account, and select the configured tenant/environment.',
       lastSeenAt: desktop.lastSeenAt,
@@ -189,20 +191,22 @@ async function executeTool(ctx, connection, tool, args, id) {
   }
 }
 
-export async function handleMcpRequest(ctx, { scopedToolName } = {}) {
+export async function handleMcpRequest(ctx, { scopedToolName, resourceKind = 'power-platform' } = {}) {
   if (!validateOrigin(ctx)) {
     return sendMcpJson(ctx, 403, jsonRpcError(null, -32000, 'Origin is not allowed.'));
   }
 
   let connection;
   try {
+    const endpointTenantId = resourceKind === 'sharepoint' ? 'sharepoint' : ctx.params.tenantId;
     const authorization = String(ctx.req.headers.authorization || '');
-    connection = authorization.startsWith('Bearer qpmcp.')
-      ? await authenticateMcpConnection({ userId: ctx.params.userId, tenantId: ctx.params.tenantId, authorization })
+    connection = resourceKind === 'power-platform' && authorization.startsWith('Bearer qpmcp.')
+      ? await authenticateMcpConnection({ userId: ctx.params.userId, tenantId: endpointTenantId, authorization })
       : await authenticateMcpOAuthToken({ authorization, resource: requestResourceUrl(ctx) });
-    if (connection.userId !== ctx.params.userId || connection.tenantId.toLowerCase() !== String(ctx.params.tenantId).toLowerCase()) {
+    if (connection.userId !== ctx.params.userId || connection.tenantId.toLowerCase() !== String(endpointTenantId).toLowerCase()) {
       throw new Error('The access token is not valid for this MCP endpoint.');
     }
+    if ((connection.kind || 'power-platform') !== resourceKind) throw new Error('The access token is not valid for this MCP resource type.');
   } catch (error) {
     return sendMcpJson(ctx, 401, jsonRpcError(null, -32001, error.message), {
       'WWW-Authenticate': `Bearer realm="quicker-portal-mcp", resource_metadata="${resourceMetadataUrl(ctx)}", scope="${INITIAL_OAUTH_SCOPES}"`
@@ -236,6 +240,8 @@ export async function handleMcpRequest(ctx, { scopedToolName } = {}) {
     return sendMcpJson(ctx, 400, jsonRpcError(body?.id, -32600, 'Invalid JSON-RPC request.'));
   }
   const isNotification = body.id === undefined || body.id === null;
+  const resourceTools = MCP_TOOLS.filter(tool => tool.group === resourceKind);
+  const isSharePoint = resourceKind === 'sharepoint';
 
   if (body.method === 'initialize') {
     const requested = String(body.params?.protocolVersion || LATEST_PROTOCOL);
@@ -248,8 +254,12 @@ export async function handleMcpRequest(ctx, { scopedToolName } = {}) {
     return sendMcpJson(ctx, 200, { jsonrpc: '2.0', id: body.id, result: {
       protocolVersion: requested,
       capabilities: { tools: { listChanged: false }, resources: { subscribe: false, listChanged: false } },
-      serverInfo: { name: 'Quicker Portal Power Platform MCP', version: '1.0.0', description: 'Executes Power Platform operations through the user-connected Quicker Portal desktop.' },
-      instructions: 'The selected Quicker Portal desktop and tenant are authoritative. Read the latest component before changing it. For existing cloud flows, forms, views, text web resources, and Canvas source, use the patch_* tool: send only targeted operations or exact anchors, never ask the user for a complete artifact and never reconstruct unchanged content from memory. The desktop performs read-modify-validate-write with stale-write protection. Canvas authoring requires this sequence: get status, connect if needed, start sync and poll its operation, list/read/search the current .pa.yaml source, patch using the exact returned revision, review the pending diff, then start apply and poll until terminal. Never claim the Canvas app was updated unless the apply operation returns verified=true; compile success without canonical verification is not success. Use Microsoft discovery tools before choosing Canvas controls, APIs, data sources, or properties. Use complete update_* replacements only for explicit import or recovery. Table, column, row, app, environment-variable, connection-reference, plug-in-step, and command-bar updates already accept semantic partial changes. PCF changes belong in source files and are deployed through the IDE/build/solution workflow. Minimize columns and row counts on reads. Preview and confirm destructive changes. Managed solution components may be read-only.'
+      serverInfo: isSharePoint
+        ? { name: 'Quicker Portal SharePoint MCP', version: '1.0.0', description: 'Safely reads and updates the SharePoint site connected in the user’s Quicker Portal desktop.' }
+        : { name: 'Quicker Portal Power Platform MCP', version: '1.0.0', description: 'Executes Power Platform operations through the user-connected Quicker Portal desktop.' },
+      instructions: isSharePoint
+        ? 'The connected Quicker Portal desktop browser session is the only authoritative SharePoint identity and site. Never ask for tenant IDs, client IDs, client secrets, app registrations, Microsoft passwords, cookies, or access tokens. Start with get_sharepoint_connection. Discover current site, drive, list, and item IDs before acting. Read a file or list item immediately before every update. For text files use patch_sharepoint_file with the exact SHA-256 revision and targeted anchors returned by read_sharepoint_file; never ask the user to paste the complete file and never reconstruct unchanged content from memory. For list items, send only changed fields using internal column names and the current ETag. Follow paging links for large libraries and lists. Keep reads bounded. Preview the exact target in your response and use delete tools only after explicit user confirmation. If the desktop or SharePoint session is disconnected, explain that the user must reconnect it in Quicker Portal rather than requesting credentials.'
+        : 'The selected Quicker Portal desktop and tenant are authoritative. Read the latest component before changing it. For existing cloud flows, forms, views, text web resources, and Canvas source, use the patch_* tool: send only targeted operations or exact anchors, never ask the user for a complete artifact and never reconstruct unchanged content from memory. The desktop performs read-modify-validate-write with stale-write protection. Canvas authoring requires this sequence: get status, connect if needed, start sync and poll its operation, list/read/search the current .pa.yaml source, patch using the exact returned revision, review the pending diff, then start apply and poll until terminal. Never claim the Canvas app was updated unless the apply operation returns verified=true; compile success without canonical verification is not success. Use Microsoft discovery tools before choosing Canvas controls, APIs, data sources, or properties. Use complete update_* replacements only for explicit import or recovery. Table, column, row, app, environment-variable, connection-reference, plug-in-step, and command-bar updates already accept semantic partial changes. When creating two or more rows in one table, always use create_records once with the complete bounded array instead of repeatedly calling create_record; this produces one reviewed desktop operation and uses Dataverse bulk execution. PCF changes belong in source files and are deployed through the IDE/build/solution workflow. Minimize columns and row counts on reads. Preview and confirm destructive changes. Managed solution components may be read-only.'
     } }, { 'MCP-Protocol-Version': requested });
   }
   if (body.method === 'notifications/initialized' || body.method.startsWith('notifications/')) return sendAccepted(ctx);
@@ -260,7 +270,7 @@ export async function handleMcpRequest(ctx, { scopedToolName } = {}) {
         'WWW-Authenticate': `Bearer resource_metadata="${resourceMetadataUrl(ctx)}", error="insufficient_scope", scope="${INITIAL_OAUTH_SCOPES}"`
       });
     }
-    const definitions = scopedToolName ? MCP_TOOLS.filter(item => item.name === scopedToolName) : MCP_TOOLS;
+    const definitions = scopedToolName ? resourceTools.filter(item => item.name === scopedToolName) : resourceTools;
     const page = pageTools(definitions, body.params?.cursor);
     if (!page) return sendMcpJson(ctx, 200, jsonRpcError(body.id, -32602, 'The tools/list cursor is invalid or expired.'));
     logger.info('MCP tool catalog page listed.', {
@@ -275,32 +285,34 @@ export async function handleMcpRequest(ctx, { scopedToolName } = {}) {
   if (body.method === 'resources/list') {
     if (!hasScope(connection, 'mcp:read')) return sendMcpJson(ctx, 403, jsonRpcError(body.id, -32003, 'The access token needs mcp:read scope.'));
     return sendMcpJson(ctx, 200, { jsonrpc: '2.0', id: body.id, result: { resources: [{
-      uri: `quickerportal://environment/${connection.tenantId}/${connection.environmentId}`,
-      name: connection.environmentName || connection.tenantName || 'Connected Power Platform environment',
-      description: 'The live environment selected by the connected Quicker Portal desktop.',
+      uri: isSharePoint ? 'quickerportal://sharepoint/current-site' : `quickerportal://environment/${connection.tenantId}/${connection.environmentId}`,
+      name: connection.environmentName || connection.tenantName || (isSharePoint ? 'Connected SharePoint site' : 'Connected Power Platform environment'),
+      description: isSharePoint ? 'The SharePoint site currently connected in the user’s Quicker Portal desktop browser session.' : 'The live environment selected by the connected Quicker Portal desktop.',
       mimeType: 'application/json'
     }] } });
   }
   if (body.method === 'resources/read') {
     if (!hasScope(connection, 'mcp:read')) return sendMcpJson(ctx, 403, jsonRpcError(body.id, -32003, 'The access token needs mcp:read scope.'));
     return sendMcpJson(ctx, 200, { jsonrpc: '2.0', id: body.id, result: { contents: [{
-      uri: body.params?.uri || `quickerportal://environment/${connection.tenantId}/${connection.environmentId}`,
+      uri: body.params?.uri || (isSharePoint ? 'quickerportal://sharepoint/current-site' : `quickerportal://environment/${connection.tenantId}/${connection.environmentId}`),
       mimeType: 'application/json',
-      text: JSON.stringify({ tenantId: connection.tenantId, tenantName: connection.tenantName, environmentId: connection.environmentId, environmentName: connection.environmentName, execution: 'connected-desktop' }, null, 2)
+      text: JSON.stringify(isSharePoint
+        ? { resource: 'sharepoint', site: connection.environmentName, execution: 'connected-desktop-browser-session', appRegistrationRequired: false }
+        : { tenantId: connection.tenantId, tenantName: connection.tenantName, environmentId: connection.environmentId, environmentName: connection.environmentName, execution: 'connected-desktop' }, null, 2)
     }] } });
   }
   if (body.method === 'tools/call') {
     const requestedName = String(body.params?.name || '');
     if (scopedToolName && requestedName !== scopedToolName) return sendMcpJson(ctx, 200, jsonRpcError(body.id, -32602, `This endpoint only exposes ${scopedToolName}.`));
     const tool = MCP_TOOL_BY_NAME.get(requestedName);
-    if (!tool) return sendMcpJson(ctx, 200, jsonRpcError(body.id, -32602, `Unknown tool: ${requestedName}.`));
+    if (!tool || tool.group !== resourceKind) return sendMcpJson(ctx, 200, jsonRpcError(body.id, -32602, `Unknown tool: ${requestedName}.`));
     const requiredScope = tool.annotations.readOnlyHint ? 'mcp:read' : 'mcp:write';
     if (!hasScope(connection, requiredScope)) {
       return sendMcpJson(ctx, 403, jsonRpcError(body.id, -32003, `The access token needs ${requiredScope} scope.`), {
         'WWW-Authenticate': `Bearer resource_metadata="${resourceMetadataUrl(ctx)}", error="insufficient_scope", scope="${INITIAL_OAUTH_SCOPES}"`
       });
     }
-    const response = await executeTool(ctx, connection, tool, body.params?.arguments || {}, body.id);
+    const response = await executeTool(ctx, connection, tool, body.params?.arguments || {}, body.id, resourceKind);
     return sendMcpJson(ctx, 200, response);
   }
   if (isNotification) return sendAccepted(ctx);

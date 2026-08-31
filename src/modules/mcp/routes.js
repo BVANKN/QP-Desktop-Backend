@@ -1,7 +1,15 @@
 import { authenticate } from '../../core/middleware/authenticate.js';
 import { readFormBody, readJsonBody, sendHtml, sendJson, sendRedirect } from '../../core/http/context.js';
 import { config } from '../../config/config.js';
-import { createMcpConnection, listMcpConnections, mcpConnectionEndpoint, mcpResourceMetadata, revokeMcpConnection } from './connections.js';
+import {
+  createMcpConnection,
+  ensureSharePointMcpConnection,
+  listMcpConnections,
+  mcpConnectionEndpoint,
+  mcpResourceMetadata,
+  revokeMcpConnection,
+  sharePointMcpConnectionEndpoint
+} from './connections.js';
 import { claimDesktopJobs, completeDesktopJob, desktopStatus, heartbeatDesktop } from './broker.js';
 import { queryTransmissionAnalytics } from './analytics.js';
 import { MCP_TOOLS } from './tool-catalog.js';
@@ -100,6 +108,9 @@ export function registerMcpRoutes(router) {
   });
   router.get('/.well-known/oauth-protected-resource/ide/mcp/:userId', ctx => {
     sendJson(ctx, 200, mcpResourceMetadata(protectedResourceUrl(ctx), endpointBase(ctx), { ide: true }));
+  });
+  router.get('/.well-known/oauth-protected-resource/sharepoint/mcp/:userId', ctx => {
+    sendJson(ctx, 200, mcpResourceMetadata(protectedResourceUrl(ctx), endpointBase(ctx), { kind: 'sharepoint' }));
   });
 
   router.get('/.well-known/oauth-authorization-server', ctx => {
@@ -213,6 +224,28 @@ export function registerMcpRoutes(router) {
   router.get('/api/mcp/tools', authenticate, requireMcpEntitlement, ctx => {
     sendJson(ctx, 200, { ok: true, tools: MCP_TOOLS });
   });
+  router.get('/api/mcp/sharepoint/bootstrap', authenticate, requireMcpEntitlement, async ctx => {
+    const connection = await ensureSharePointMcpConnection(ctx.auth.sub);
+    const mcpUrl = sharePointMcpConnectionEndpoint(endpointBase(ctx), ctx.auth.sub);
+    sendJson(ctx, 200, {
+      ok: true,
+      connection,
+      mcpUrl,
+      endpoint: mcpUrl,
+      oauth: {
+        url: mcpUrl,
+        authentication: 'oauth',
+        discovery: 'automatic',
+        scopes: ['mcp:read', 'mcp:write', 'offline_access']
+      },
+      desktop: desktopStatus(ctx.auth.sub, 'sharepoint', 'sharepoint'),
+      sharePoint: {
+        authentication: 'connected-desktop-browser-session',
+        appRegistrationRequired: false,
+        customerTenantConfigurationRequired: false
+      }
+    });
+  });
   router.get('/api/mcp/connections', authenticate, requireMcpEntitlement, async ctx => {
     const connections = await listMcpConnections(ctx.auth.sub);
     sendJson(ctx, 200, { ok: true, connections: connections.map(connection => ({
@@ -269,4 +302,7 @@ export function registerMcpRoutes(router) {
   router.delete('/mcp/:userId/:tenantId', ctx => handleMcpRequest(ctx));
   router.post('/mcp/:userId/:tenantId/:toolName', ctx => handleMcpRequest(ctx, { scopedToolName: ctx.params.toolName }));
   router.get('/mcp/:userId/:tenantId/:toolName', ctx => handleMcpRequest(ctx, { scopedToolName: ctx.params.toolName }));
+  router.post('/sharepoint/mcp/:userId', ctx => handleMcpRequest(ctx, { resourceKind: 'sharepoint' }));
+  router.get('/sharepoint/mcp/:userId', ctx => handleMcpRequest(ctx, { resourceKind: 'sharepoint' }));
+  router.delete('/sharepoint/mcp/:userId', ctx => handleMcpRequest(ctx, { resourceKind: 'sharepoint' }));
 }

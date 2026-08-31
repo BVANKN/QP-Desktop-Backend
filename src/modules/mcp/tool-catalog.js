@@ -16,6 +16,7 @@ function tool(name, action, description, inputSchema = object(), options = {}) {
   return Object.freeze({
     name,
     action,
+    group: options.group || 'power-platform',
     description,
     inputSchema,
     annotations: {
@@ -56,6 +57,14 @@ const anchoredTextEdit = object({
   expectedOccurrences: number('Exact number of anchors that must match before replacement.', { minimum: 1 })
 });
 const revision = string('Optional SHA-256 revision returned by the corresponding read tool. If supplied, a stale write is rejected.');
+const sharePointOptions = { group: 'sharepoint' };
+const sharePointWriteOptions = { group: 'sharepoint', readOnly: false };
+const sharePointDestructiveOptions = { group: 'sharepoint', readOnly: false, destructive: true };
+const sharePointDriveId = string('Drive or document-library ID returned by a SharePoint read tool.');
+const sharePointItemId = string('Drive-item ID returned by a SharePoint read tool.');
+const sharePointSiteId = string('SharePoint site ID returned by search_sharepoint_sites or get_sharepoint_connection.');
+const sharePointListId = string('SharePoint list ID returned by get_sharepoint_site.');
+const sharePointFields = { type: 'object', description: 'SharePoint list fields keyed by internal column name. Preserve fields you are not changing.', additionalProperties: true };
 // Canvas authoring has many small, purpose-specific tools. Keep their repeated
 // fields compact so the paged tools/list response stays inexpensive without
 // sacrificing the operation-specific guidance models need.
@@ -199,6 +208,11 @@ export const MCP_TOOLS = Object.freeze([
     includeFormattedValues: boolean('Include Dataverse formatted-value annotations.')
   }, ['tableLogicalName'])),
   tool('execute_fetchxml', 'fetchxml', 'Execute FetchXML against the connected environment with Dataverse paging.', object({ fetchXml: string('Complete FetchXML query.'), pageSize: number('Rows per page, from 1 to 5000.', { minimum: 1, maximum: 5000 }) }, ['fetchXml'])),
+  tool('create_records', 'mcpCreateRecords', 'Create 1–1,000 Dataverse rows in one reviewed operation. Prefer this tool whenever creating more than one row; it uses CreateMultiple when supported and an atomic $batch fallback otherwise, so the desktop asks for one approval for the complete bounded batch.', object({
+    tableLogicalName: tableName,
+    records: array(arbitraryPayload, 'Dataverse rows keyed by logical column name. All rows must target the same table.', { minItems: 1, maxItems: 1000 }),
+    elastic: boolean('Set true only when the target is an elastic table.')
+  }, ['tableLogicalName', 'records']), { readOnly: false, timeoutMs: 90_000 }),
   tool('create_record', 'mcpCreateRecord', 'Create one Dataverse row. Returns the created record identifier.', object({ tableLogicalName: tableName, values: arbitraryPayload }, ['tableLogicalName', 'values']), { readOnly: false }),
   tool('update_record', 'mcpUpdateRecord', 'Update selected values on one Dataverse row.', object({ tableLogicalName: tableName, recordId, values: arbitraryPayload }, ['tableLogicalName', 'recordId', 'values']), { readOnly: false, idempotent: true }),
   tool('delete_record', 'mcpDeleteRecord', 'Permanently delete one Dataverse row after explicit approval.', object({ tableLogicalName: tableName, recordId, confirm }, ['tableLogicalName', 'recordId', 'confirm']), { readOnly: false, destructive: true }),
@@ -338,6 +352,65 @@ export const MCP_TOOLS = Object.freeze([
   }, ['rollbackToken', 'confirm']), { readOnly: false, destructive: true, timeoutMs: 120_000 }),
   tool('deploy_command_bar_definition', 'deployRibbonDiff', 'Validate and deploy table RibbonDiffXml through Quicker Portal Command Workbench with rollback support.', object({ logicalName: tableName, metadataId: string('Table metadata GUID returned by list_command_bar_targets.'), ribbonDiffXml: string('Complete RibbonDiffXml payload.'), solutionUniqueName: string('Unmanaged solution unique name.'), confirm: boolean('Confirm deploying and publishing command bar customization.') }, ['logicalName', 'metadataId', 'ribbonDiffXml', 'solutionUniqueName', 'confirm']), { readOnly: false, timeoutMs: 120_000 }),
 
+  // SharePoint MCP is intentionally a separate OAuth resource. These tools
+  // execute only against the SharePoint site already connected in the user's
+  // desktop browser session; no customer tenant ID, client secret, or app
+  // registration is accepted by this catalog.
+  tool('get_sharepoint_connection', 'mcpSharePointStatus', 'Get the authoritative local SharePoint connection state, mode, and connected site. Call this first. If disconnected, ask the user to connect a site in Quicker Portal; never request Microsoft credentials.', object(), sharePointOptions),
+  tool('list_sharepoint_sites', 'mcpSharePointOverview', 'List SharePoint sites available through the current connected desktop session and return a bounded workspace overview.', object(), sharePointOptions),
+  tool('search_sharepoint_sites', 'mcpSharePointSearchSites', 'Search SharePoint sites visible to the current user. Use a specific query and inspect the returned IDs before accessing site content.', object({
+    query: string('Site name, URL, or description search text.'),
+    from: number('Zero-based result offset.', { minimum: 0 }),
+    size: number('Bounded page size.', { minimum: 1, maximum: 100 })
+  }, ['query']), sharePointOptions),
+  tool('get_sharepoint_site', 'mcpSharePointSiteWorkspace', 'Read one SharePoint site workspace, including its document libraries and lists. Use IDs from this result in later calls.', object({ siteId: sharePointSiteId }, ['siteId']), sharePointOptions),
+  tool('list_sharepoint_drive_items', 'mcpSharePointDriveItems', 'List files and folders in one SharePoint document library folder. Results are paged; follow nextLink rather than requesting an unbounded tree.', object({
+    driveId: sharePointDriveId,
+    itemId: string('Optional folder item ID. Omit for the drive root.'),
+    query: string('Optional client-supported name filter.'),
+    nextLink: string('Opaque continuation URL returned by the preceding page.')
+  }, ['driveId']), sharePointOptions),
+  tool('get_sharepoint_drive_item', 'mcpSharePointDriveItem', 'Read current metadata for one SharePoint file or folder, including its ETag when available.', object({ driveId: sharePointDriveId, itemId: sharePointItemId }, ['driveId', 'itemId']), sharePointOptions),
+  tool('read_sharepoint_file', 'mcpSharePointReadFile', 'Read the complete current content of a bounded SharePoint file and receive its SHA-256 revision. Always call this immediately before patch_sharepoint_file; never reconstruct unchanged content from memory.', object({
+    driveId: sharePointDriveId,
+    itemId: sharePointItemId,
+    encoding: { type: 'string', enum: ['utf8', 'base64'], description: 'Use utf8 for text and base64 only for bounded binary inspection.' },
+    maxBytes: number('Maximum accepted file size for this read. The hard limit is 2 MB.', { minimum: 1, maximum: 2097152 })
+  }, ['driveId', 'itemId']), sharePointOptions),
+  tool('create_sharepoint_folder', 'mcpSharePointCreateFolder', 'Create one folder in a SharePoint document library. Use the exact parent item ID returned by a current listing.', object({ driveId: sharePointDriveId, parentId: string('Optional parent folder item ID; omit for root.'), name: string('New folder name.') }, ['driveId', 'name']), sharePointWriteOptions),
+  tool('rename_sharepoint_drive_item', 'mcpSharePointRenameDriveItem', 'Rename one current SharePoint file or folder by ID.', object({ driveId: sharePointDriveId, itemId: sharePointItemId, name: string('New file or folder name.') }, ['driveId', 'itemId', 'name']), { ...sharePointWriteOptions, idempotent: true }),
+  tool('create_sharepoint_file', 'mcpSharePointCreateFile', 'Create a bounded file in a SharePoint document library. For text use UTF-8. This is for new files only; use targeted revision-protected patches for existing text files.', object({
+    driveId: sharePointDriveId,
+    parentId: string('Optional parent folder item ID; omit for root.'),
+    name: string('New file name including extension.'),
+    content: string('Complete new file content encoded according to encoding.'),
+    encoding: { type: 'string', enum: ['utf8', 'base64'], description: 'Content encoding.' }
+  }, ['driveId', 'name', 'content']), sharePointWriteOptions),
+  tool('patch_sharepoint_file', 'mcpSharePointPatchFile', 'Apply exact anchored edits to the latest UTF-8 SharePoint file. Supply the SHA-256 revision from read_sharepoint_file. Stale revisions and ambiguous anchors are rejected, so the user never has to paste the complete file.', object({
+    driveId: sharePointDriveId,
+    itemId: sharePointItemId,
+    expectedRevision: string('Required 64-character SHA-256 revision returned by the latest read_sharepoint_file.'),
+    edits: array(anchoredTextEdit, 'One or more exact, non-overlapping text edits.', { minItems: 1, maxItems: 100 })
+  }, ['driveId', 'itemId', 'expectedRevision', 'edits']), { ...sharePointWriteOptions, idempotent: true }),
+  tool('delete_sharepoint_drive_item', 'mcpSharePointDeleteDriveItem', 'Delete one SharePoint file or folder after explicit user confirmation. Re-list the parent first so the ID and target are current.', object({ driveId: sharePointDriveId, itemId: sharePointItemId, confirm }, ['driveId', 'itemId', 'confirm']), sharePointDestructiveOptions),
+  tool('list_sharepoint_columns', 'mcpSharePointListSchema', 'Read the current column schema for one SharePoint list. Use internal names—not display labels—for list-item fields.', object({ siteId: sharePointSiteId, listId: sharePointListId }, ['siteId', 'listId']), sharePointOptions),
+  tool('list_sharepoint_list_items', 'mcpSharePointListItems', 'Read a bounded page of SharePoint list items. Follow nextLink for additional pages and avoid broad reads when a specific item is known.', object({
+    siteId: sharePointSiteId,
+    listId: sharePointListId,
+    pageSize: number('Bounded page size.', { minimum: 1, maximum: 200 }),
+    nextLink: string('Opaque continuation URL returned by the preceding page.')
+  }, ['siteId', 'listId']), sharePointOptions),
+  tool('get_sharepoint_list_item', 'mcpSharePointListItem', 'Read the latest complete field values and ETag for one SharePoint list item. Call this immediately before updating the item.', object({ siteId: sharePointSiteId, listId: sharePointListId, itemId: string('SharePoint list item ID.') }, ['siteId', 'listId', 'itemId']), sharePointOptions),
+  tool('create_sharepoint_list_item', 'mcpSharePointCreateListItem', 'Create one SharePoint list item using internal column names from list_sharepoint_columns.', object({ siteId: sharePointSiteId, listId: sharePointListId, fields: sharePointFields }, ['siteId', 'listId', 'fields']), sharePointWriteOptions),
+  tool('update_sharepoint_list_item', 'mcpSharePointUpdateListItem', 'Update only supplied SharePoint list fields. Read the item first and pass its current ETag so concurrent changes are rejected rather than overwritten.', object({
+    siteId: sharePointSiteId,
+    listId: sharePointListId,
+    itemId: string('SharePoint list item ID.'),
+    eTag: string('Current ETag returned by get_sharepoint_list_item.'),
+    fields: sharePointFields
+  }, ['siteId', 'listId', 'itemId', 'eTag', 'fields']), { ...sharePointWriteOptions, idempotent: true }),
+  tool('delete_sharepoint_list_item', 'mcpSharePointDeleteListItem', 'Delete one current SharePoint list item after explicit user confirmation.', object({ siteId: sharePointSiteId, listId: sharePointListId, itemId: string('SharePoint list item ID.'), confirm }, ['siteId', 'listId', 'itemId', 'confirm']), sharePointDestructiveOptions),
+
   tool('open_cloud_flow', 'openPowerAutomateFlow', 'Open a cloud flow in the restricted Quicker Portal browser on the connected desktop.', object({ workflowId: string('Cloud flow workflow GUID.'), flowUrl: string('Optional known flow URL.') }, ['workflowId']), { readOnly: false }),
   tool('open_canvas_app', 'openCanvasApp', 'Open a canvas app in the restricted Quicker Portal browser on the connected desktop.', object({ appId: string('Canvas app ID.'), appUrl: string('Optional known play URL.') }, ['appId']), { readOnly: false })
 ]);
@@ -358,6 +431,7 @@ export function publicTool(toolDefinition) {
     _meta: {
       securitySchemes,
       'quickerportal/action': toolDefinition.action,
+      'quickerportal/resource': toolDefinition.group,
       'quickerportal/risk': toolDefinition.risk,
       'quickerportal/execution': 'connected-desktop'
     }
