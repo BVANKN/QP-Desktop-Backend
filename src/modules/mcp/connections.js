@@ -185,9 +185,12 @@ export function ideMcpConnectionEndpoint(endpointBase, userId) {
  * cookies, and access tokens never pass through this service: operations are
  * leased to the user's live Quicker Portal desktop browser session.
  */
-export async function ensureSharePointMcpConnection(userId) {
-  const now = new Date().toISOString();
-  const defaults = {
+export function sharePointMcpConnectionSeed(userId, { now = new Date().toISOString() } = {}) {
+  // Fields in $set and $setOnInsert must be disjoint. MongoDB rejects an
+  // upsert when the same path (for example enabled or revokedAt) appears in
+  // both operators, even though the values are identical.
+  const activation = { enabled: true, revokedAt: null };
+  const insertOnly = {
     kind: 'sharepoint',
     userId,
     tenantId: 'sharepoint',
@@ -198,17 +201,20 @@ export async function ensureSharePointMcpConnection(userId) {
     environmentName: 'Connected SharePoint site',
     name: 'Quicker Portal SharePoint MCP',
     captureMode: 'metadata',
-    enabled: true,
     keyHash: null,
     keyPrefix: null,
     createdAt: now,
-    lastUsedAt: null,
-    revokedAt: null
+    lastUsedAt: null
   };
+  return { activation, insertOnly };
+}
+
+export async function ensureSharePointMcpConnection(userId) {
+  const { activation, insertOnly } = sharePointMcpConnectionSeed(userId);
   if (mongoEnabled()) {
     const updated = await (await mongoCollection('mcp_connections')).findOneAndUpdate(
       { userId, kind: 'sharepoint' },
-      { $set: { enabled: true, revokedAt: null }, $setOnInsert: { id: randomId('spmcp'), ...defaults } },
+      { $set: activation, $setOnInsert: { id: randomId('spmcp'), ...insertOnly } },
       { upsert: true, returnDocument: 'after' }
     );
     return publicConnection(updated);
@@ -220,7 +226,7 @@ export async function ensureSharePointMcpConnection(userId) {
       existing.revokedAt = null;
       return { result: publicConnection(existing) };
     }
-    const connection = { id: randomId('spmcp'), ...defaults };
+    const connection = { id: randomId('spmcp'), ...insertOnly, ...activation };
     document.connections.push(connection);
     return { result: publicConnection(connection) };
   });

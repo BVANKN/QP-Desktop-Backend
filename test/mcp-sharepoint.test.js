@@ -1,15 +1,24 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { useTemporaryDataDir, startTestServer, readLatestCode, VALID_PASSWORD } from './helpers/test-server.js';
+import { sharePointMcpConnectionSeed } from '../src/modules/mcp/connections.js';
 
 const dataDir = useTemporaryDataDir();
 const server = await startTestServer();
 test.after(() => server.close());
 
+test('SharePoint Mongo upsert operators never write the same path', () => {
+  const seed = sharePointMcpConnectionSeed('user-1', { now: '2026-08-31T00:00:00.000Z' });
+  assert.deepEqual(Object.keys(seed.activation).sort(), ['enabled', 'revokedAt']);
+  assert.deepEqual(Object.keys(seed.activation).filter(key => Object.hasOwn(seed.insertOnly, key)), []);
+  assert.equal(seed.insertOnly.kind, 'sharepoint');
+});
+
 async function register(username, planId) {
+  const uniqueUsername = `${username}${randomUUID().replaceAll('-', '').slice(0, 10)}`;
   const started = await server.call('POST', '/api/auth/signup/start', {
-    name: `${username} account`, username, email: `${username}@example.com`,
+    name: `${username} account`, username: uniqueUsername, email: `${uniqueUsername}@example.com`,
     password: VALID_PASSWORD, confirmPassword: VALID_PASSWORD, planId
   });
   assert.equal(started.status, 200, JSON.stringify(started.body));
