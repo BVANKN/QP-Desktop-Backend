@@ -36,6 +36,7 @@ export const AGENT_METHOD = {
   GIT_STATUS: 'gitStatus',
   GIT_DIFF: 'gitDiff',
   GIT_CHECKPOINT: 'gitCheckpoint',
+  ENSURE_GITIGNORE: 'ensureGitignore',
   RUN_COMMAND: 'runCommand',
   CANCEL_COMMAND: 'cancelCommand',
   REINDEX: 'reindex',

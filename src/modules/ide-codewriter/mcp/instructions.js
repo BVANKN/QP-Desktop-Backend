@@ -93,15 +93,31 @@ Single-file workspaces are exempt — there is no project to build.
 Send related edits in a single \`write_files\` call. It applies them together, so
 the user's editor never shows a half-applied refactor.
 
+**7. Keep dependencies reproducible and generated output out of Git.**
+When creating or scaffolding a project, adding an ecosystem manifest, or before
+running any install, restore, build, test, generator or package-manager command,
+call \`ensure_gitignore\` with \`mode: "project"\`. Preview when useful, then call
+it with \`apply: true\` before the command if it reports missing rules.
+
+Declare third-party dependencies in the project's real manifest and install them
+with its package manager. Do not copy dependency source into the workspace and do
+not ignore dependency manifests or lockfiles. Files such as \`package-lock.json\`,
+\`pnpm-lock.yaml\`, \`yarn.lock\`, \`packages.lock.json\`, \`Cargo.lock\` and their
+manifests are reproducibility source and normally belong in Git. Folders such as
+\`node_modules/\`, \`.venv/\`, \`bin/\`, \`obj/\`, \`target/\`, caches and build
+output do not. \`ensure_gitignore\` preserves every existing rule and appends only
+missing project-appropriate rules through the normal approval and undo workflow.
+
 ## Recommended sequence
 
 1. \`get_workspace_overview\` — what this project is, how it is built and tested.
 2. \`list_files\` / \`search_files\` — locate the relevant code.
 3. \`read_files\` — read every file you will change, plus its callers.
 4. \`write_files\` — complete content, correct \`baseRevision\`, all files at once.
-5. \`run_command\` — run each required check.
-6. Fix and repeat 3-5 until the checks pass.
-7. \`finish_task\` — summarise what changed and why.
+5. \`ensure_gitignore\` — apply missing dependency/build rules before commands create artifacts.
+6. \`run_command\` — run each required check.
+7. Fix and repeat 3-6 until the checks pass.
+8. \`finish_task\` — summarise what changed and why.
 
 ## If something goes wrong
 
@@ -123,7 +139,10 @@ will reach their files until they reopen it.`;
 export const REMINDERS = {
   afterWrite: (verification) => {
     if (!verification || !verification.enforced) {
-      return 'Reminder: re-read any file you intend to edit again before writing to it.';
+      return [
+        'Reminder: re-read any file you intend to edit again before writing to it.',
+        'If this change scaffolds a project or adds dependencies, run ensure_gitignore before installing or building.'
+      ].join('\n');
     }
     const commands = verification.commands.filter((c) => c.required).map((c) => c.label);
     return [
@@ -133,7 +152,10 @@ export const REMINDERS = {
       ...commands.map((label, i) => `  ${i + 1}. ${label}`),
       '',
       'finish_task will fail until every one of them has passed since this write.',
-      'If you edit again afterwards, the checks must be re-run: an edit invalidates them.'
+      'If you edit again afterwards, the checks must be re-run: an edit invalidates them.',
+      '',
+      'Before any install/build command creates dependencies or generated output, call',
+      'ensure_gitignore with mode "project" and apply true if it reports missing rules.'
     ].join('\n');
   },
 

@@ -143,6 +143,7 @@ export async function fetchFiles(ctx, { workspace, agent, paths }) {
 export const REQUIRED_AGENT_CAPABILITIES = {
   describeEnvironment: 'reporting the OS and installed toolchains',
   gitCheckpoint: 'automatic git safety commits',
+  ensureGitignore: 'safe, append-only .gitignore maintenance for dependencies and generated output',
   installPrompt: 'asking before installing software instead of refusing',
   boundedApproval: 'approval prompts that cannot outlive a request'
 };

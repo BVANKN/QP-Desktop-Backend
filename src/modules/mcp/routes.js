@@ -3,10 +3,12 @@ import { readFormBody, readJsonBody, sendHtml, sendJson, sendRedirect } from '..
 import { config } from '../../config/config.js';
 import {
   createMcpConnection,
+  ensurePowerPagesMcpConnection,
   ensureSharePointMcpConnection,
   listMcpConnections,
   mcpConnectionEndpoint,
   mcpResourceMetadata,
+  powerPagesMcpConnectionEndpoint,
   revokeMcpConnection,
   sharePointMcpConnectionEndpoint
 } from './connections.js';
@@ -111,6 +113,9 @@ export function registerMcpRoutes(router) {
   });
   router.get('/.well-known/oauth-protected-resource/sharepoint/mcp/:userId', ctx => {
     sendJson(ctx, 200, mcpResourceMetadata(protectedResourceUrl(ctx), endpointBase(ctx), { kind: 'sharepoint' }));
+  });
+  router.get('/.well-known/oauth-protected-resource/powerpages/mcp/:userId/:tenantId', ctx => {
+    sendJson(ctx, 200, mcpResourceMetadata(protectedResourceUrl(ctx), endpointBase(ctx), { kind: 'powerpages' }));
   });
 
   router.get('/.well-known/oauth-authorization-server', ctx => {
@@ -246,6 +251,26 @@ export function registerMcpRoutes(router) {
       }
     });
   });
+  router.get('/api/mcp/powerpages/bootstrap', authenticate, requireMcpEntitlement, async ctx => {
+    const tenantId = ctx.url.searchParams.get('tenantId') || '';
+    const environmentId = ctx.url.searchParams.get('environmentId') || '';
+    const connection = await ensurePowerPagesMcpConnection(ctx.auth.sub, {
+      tenantId,
+      environmentId,
+      tenantName: ctx.url.searchParams.get('tenantName') || '',
+      environmentName: ctx.url.searchParams.get('environmentName') || ''
+    });
+    const mcpUrl = powerPagesMcpConnectionEndpoint(endpointBase(ctx), ctx.auth.sub, tenantId);
+    sendJson(ctx, 200, {
+      ok: true,
+      connection,
+      mcpUrl,
+      endpoint: mcpUrl,
+      oauth: { url: mcpUrl, authentication: 'oauth', discovery: 'automatic', scopes: ['mcp:read', 'mcp:write', 'offline_access'] },
+      desktop: desktopStatus(ctx.auth.sub, `powerpages:${tenantId}`, environmentId),
+      powerPages: { environmentId, modelDetection: 'automatic', execution: 'connected-desktop', localWriteApproval: true }
+    });
+  });
   router.get('/api/mcp/connections', authenticate, requireMcpEntitlement, async ctx => {
     const connections = await listMcpConnections(ctx.auth.sub);
     sendJson(ctx, 200, { ok: true, connections: connections.map(connection => ({
@@ -305,4 +330,7 @@ export function registerMcpRoutes(router) {
   router.post('/sharepoint/mcp/:userId', ctx => handleMcpRequest(ctx, { resourceKind: 'sharepoint' }));
   router.get('/sharepoint/mcp/:userId', ctx => handleMcpRequest(ctx, { resourceKind: 'sharepoint' }));
   router.delete('/sharepoint/mcp/:userId', ctx => handleMcpRequest(ctx, { resourceKind: 'sharepoint' }));
+  router.post('/powerpages/mcp/:userId/:tenantId', ctx => handleMcpRequest(ctx, { resourceKind: 'powerpages' }));
+  router.get('/powerpages/mcp/:userId/:tenantId', ctx => handleMcpRequest(ctx, { resourceKind: 'powerpages' }));
+  router.delete('/powerpages/mcp/:userId/:tenantId', ctx => handleMcpRequest(ctx, { resourceKind: 'powerpages' }));
 }

@@ -7,7 +7,10 @@ const store = new JsonStore('mcp/jobs.json', { version: 1, jobs: [] });
 const desktopHeartbeats = new Map();
 
 const JOB_RETENTION_MS = 24 * 60 * 60_000;
-const DEFAULT_LEASE_MS = 125_000;
+// The lease must outlive the longest 120s desktop action plus result-upload
+// latency. Otherwise a healthy long PAC/Dataverse call can be re-queued while
+// the first desktop execution is still completing.
+const DEFAULT_LEASE_MS = 150_000;
 const MAX_PENDING_JOBS_PER_USER = 50;
 
 function prune(document) {
@@ -16,6 +19,14 @@ function prune(document) {
   const active = retained.filter(job => !['completed', 'failed', 'expired'].includes(job.status));
   const terminal = retained.filter(job => ['completed', 'failed', 'expired'].includes(job.status)).slice(-2000);
   document.jobs = [...terminal, ...active].sort((left, right) => String(left.createdAt).localeCompare(String(right.createdAt)));
+}
+
+function desktopJobFailure(job) {
+  const result = job?.result && typeof job.result === 'object' ? job.result : null;
+  const error = new Error(job?.error || result?.error || 'Desktop MCP execution failed.');
+  error.code = result?.code || 'DESKTOP_EXECUTION_FAILED';
+  if (result?.details) error.details = result.details;
+  return error;
 }
 
 export async function enqueueDesktopToolCall({ connection, tool, arguments: args, requestId }) {
@@ -246,12 +257,12 @@ async function waitForMongoDesktopJob(jobId, timeoutMs) {
       return snapshot;
     }
     if (['failed', 'expired'].includes(job.status)) {
-      const message = job.error || 'Desktop MCP execution failed.';
+      const failure = desktopJobFailure(job);
       await collection.updateOne(
         { id: jobId },
         { $set: { arguments: null, result: null, purgedAt: new Date().toISOString(), retentionAt: new Date(Date.now() + JOB_RETENTION_MS) } }
       );
-      throw new Error(message);
+      throw failure;
     }
     await new Promise(resolve => setTimeout(resolve, 180));
   }
@@ -299,7 +310,7 @@ export async function waitForDesktopJob(jobId, timeoutMs) {
       });
     }
     if (['failed', 'expired'].includes(job.status)) {
-      const message = job.error || 'Desktop MCP execution failed.';
+      const failure = desktopJobFailure(job);
       await store.update(current => {
         const failed = current.jobs.find(item => item.id === jobId);
         if (failed) {
@@ -309,7 +320,7 @@ export async function waitForDesktopJob(jobId, timeoutMs) {
         }
         return {};
       });
-      throw new Error(message);
+      throw failure;
     }
     await new Promise(resolve => setTimeout(resolve, 180));
   }

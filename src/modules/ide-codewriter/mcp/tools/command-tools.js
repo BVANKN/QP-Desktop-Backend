@@ -31,6 +31,42 @@ const FIRST_WAIT_MS = 25_000;
 const PROGRESS_INTERVAL_MS = 2000;
 
 /**
+ * Commands that can materialise downloaded packages, caches or build output.
+ *
+ * This is intentionally based on argv rather than a shell string: run_command
+ * never invokes a shell, so the program and subcommand are unambiguous. Version
+ * and inspection calls stay fast and unblocked; commands that can write a large
+ * tree get the hygiene preflight.
+ */
+function needsGitignorePreflight(argv) {
+  const program = String(argv?.[0] || '')
+    .split(/[\\/]/)
+    .pop()
+    .toLowerCase()
+    .replace(/\.(?:cmd|exe)$/i, '');
+  const subcommand = String(argv?.[1] || '').toLowerCase();
+
+  if (['npx', 'msbuild', 'mvn', 'mvnw', 'gradle', 'gradlew', 'make', 'cmake'].includes(program)) return true;
+  if (['pip', 'pip3', 'poetry', 'pipenv', 'uv'].includes(program)) return true;
+  if (['npm', 'pnpm', 'yarn', 'bun'].includes(program)) {
+    return !['', '--version', '-v', 'version', 'config', 'help', '--help'].includes(subcommand);
+  }
+  if (program === 'dotnet') {
+    return ['restore', 'build', 'test', 'run', 'publish', 'pack', 'new', 'tool', 'add', 'workload'].includes(subcommand);
+  }
+  if (program === 'cargo') {
+    return ['build', 'check', 'test', 'run', 'install', 'update', 'bench'].includes(subcommand);
+  }
+  if (['python', 'python3', 'py'].includes(program)) {
+    const moduleIndex = argv.indexOf('-m');
+    const moduleName = moduleIndex >= 0 ? String(argv[moduleIndex + 1] || '').toLowerCase() : '';
+    return ['pip', 'venv', 'build', 'pytest', 'tox'].includes(moduleName);
+  }
+  if (program === 'pac') return ['pcf', 'solution', 'package'].includes(subcommand);
+  return false;
+}
+
+/**
  * Streams progress notifications to the MCP client while a command runs.
  *
  * Two things this buys. The obvious one is that the user watching their client
@@ -91,6 +127,10 @@ export function registerCommandTools(server, ctx) {
         'This is how you verify your work. After changing code in a project folder you are REQUIRED to ' +
         'run the checks listed by get_workspace_overview and get them passing; finish_task will refuse ' +
         'to succeed otherwise.\n\n' +
+        'DEPENDENCY HYGIENE: before an install, restore, build, test, generator, or package-manager ' +
+        'command, call `ensure_gitignore` with mode "project" and apply true if it reports missing rules. ' +
+        'This keeps downloaded dependencies and generated output out of Git while preserving manifests ' +
+        'and lockfiles for reproducible builds.\n\n' +
         'Prefer `commandId` — pass the exact id of a detected check — over spelling out `argv`. Detected ' +
         'checks are pre-approved and use the project\'s own package manager.\n\n' +
         'Arguments are passed directly to the process. There is no shell, so pipes, redirects, `&&`, ' +
@@ -163,6 +203,49 @@ export function registerCommandTools(server, ctx) {
         throw badRequest(
           'Provide either "commandId" (preferred, from get_workspace_overview) or a non-empty "argv" array.'
         );
+      }
+
+      // Prevent the common failure mode rather than merely documenting it:
+      // package managers can create tens of thousands of files before Git
+      // hygiene is noticed. The desktop planner knows the actual project and
+      // its existing rules, so this preflight is precise and does not mutate.
+      // The model applies the visible plan with ensure_gitignore, then retries
+      // this exact command. Older desktop builds keep their existing command
+      // behaviour; the named tool reports the version mismatch when called.
+      if (
+        workspace.kind === 'folder' &&
+        agent.capabilities?.has('ensureGitignore') &&
+        needsGitignorePreflight(argv)
+      ) {
+        const hygiene = await agent.request(
+          AGENT_METHOD.ENSURE_GITIGNORE,
+          {
+            workspaceId: workspace.id,
+            mode: 'project',
+            paths: [],
+            apply: false,
+            meta: { actor: 'mcp', actorName: clientName, reason: 'pre-command-dependency-hygiene', at: Date.now() }
+          },
+          { timeoutMs: config.bridgeRpcTimeoutMs }
+        );
+        if (hygiene?.ok && hygiene.additions?.length) {
+          const additions = hygiene.additions
+            .map((item) => `  ${item.pattern}${item.why ? `  - ${item.why}` : ''}`)
+            .join('\n');
+          return fail(
+            `Command not started: ${hygiene.additions.length} dependency/build rule(s) are missing from .gitignore.\n\n` +
+              `${additions}\n\n` +
+              'Call ensure_gitignore with mode "project" and apply true, then retry this exact command. ' +
+              'Do not add manifests or lockfiles to .gitignore.',
+            {
+              error: 'GITIGNORE_REVIEW_REQUIRED',
+              command: argv,
+              workspaceId: workspace.id,
+              additions: hygiene.additions,
+              ecosystems: hygiene.ecosystems || []
+            }
+          );
+        }
       }
 
       const timeoutSec = boundedInt(args.timeoutSec, {

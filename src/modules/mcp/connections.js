@@ -103,11 +103,11 @@ export async function createMcpConnection(userId, input, endpointBase) {
 
 export async function listMcpConnections(userId) {
   if (mongoEnabled()) {
-    const rows = await (await mongoCollection('mcp_connections')).find({ userId, kind: { $nin: ['ide', 'sharepoint'] } }).sort({ createdAt: -1 }).toArray();
+    const rows = await (await mongoCollection('mcp_connections')).find({ userId, kind: { $nin: ['ide', 'sharepoint', 'powerpages'] } }).sort({ createdAt: -1 }).toArray();
     return rows.map(publicConnection);
   }
   const document = await store.read();
-  return document.connections.filter(item => item.userId === userId && !['ide', 'sharepoint'].includes(item.kind)).map(publicConnection);
+  return document.connections.filter(item => item.userId === userId && !['ide', 'sharepoint', 'powerpages'].includes(item.kind)).map(publicConnection);
 }
 
 /**
@@ -236,6 +236,47 @@ export function sharePointMcpConnectionEndpoint(endpointBase, userId) {
   return `${String(endpointBase).replace(/\/+$/, '')}/sharepoint/mcp/${encodeURIComponent(userId)}`;
 }
 
+export async function ensurePowerPagesMcpConnection(userId, input = {}) {
+  const tenantId = cleanIdentifier(input.tenantId, 'tenantId');
+  const environmentId = cleanIdentifier(input.environmentId, 'environmentId', 256);
+  const tenantKey = `powerpages:${tenantId}`;
+  const now = new Date().toISOString();
+  const activation = {
+    enabled: true,
+    revokedAt: null,
+    tenantName: String(input.tenantName || '').trim().slice(0, 160),
+    environmentName: String(input.environmentName || '').trim().slice(0, 160)
+  };
+  const insertOnly = {
+    kind: 'powerpages', userId, tenantId: tenantKey, tenantKey: tenantKey.toLowerCase(),
+    sourceTenantId: tenantId, environmentId, environmentKey: environmentId.toLowerCase(),
+    name: 'Quicker Portal Power Pages MCP', captureMode: 'metadata', keyHash: null,
+    keyPrefix: null, createdAt: now, lastUsedAt: null
+  };
+  if (mongoEnabled()) {
+    const updated = await (await mongoCollection('mcp_connections')).findOneAndUpdate(
+      { userId, kind: 'powerpages', tenantKey: tenantKey.toLowerCase(), environmentKey: environmentId.toLowerCase() },
+      { $set: activation, $setOnInsert: { id: randomId('ppmcp'), ...insertOnly } },
+      { upsert: true, returnDocument: 'after' }
+    );
+    return publicConnection(updated);
+  }
+  return store.update(document => {
+    const existing = document.connections.find(item => item.userId === userId && item.kind === 'powerpages' && item.tenantKey === tenantKey.toLowerCase() && item.environmentKey === environmentId.toLowerCase());
+    if (existing) {
+      Object.assign(existing, activation);
+      return { result: publicConnection(existing) };
+    }
+    const connection = { id: randomId('ppmcp'), ...insertOnly, ...activation };
+    document.connections.push(connection);
+    return { result: publicConnection(connection) };
+  });
+}
+
+export function powerPagesMcpConnectionEndpoint(endpointBase, userId, tenantId) {
+  return `${String(endpointBase).replace(/\/+$/, '')}/powerpages/mcp/${encodeURIComponent(userId)}/${encodeURIComponent(tenantId)}`;
+}
+
 export function mcpConnectionEndpoint(endpointBase, connection) {
   const base = String(endpointBase).replace(/\/+$/, '');
   const path = `/mcp/${encodeURIComponent(connection.userId)}/${encodeURIComponent(connection.tenantId)}`;
@@ -325,16 +366,18 @@ export function mcpResourceMetadata(resourceUrl, serviceBaseUrl, { kind = 'power
   const resourceKind = ide ? 'ide' : kind;
   const isIde = resourceKind === 'ide';
   const isSharePoint = resourceKind === 'sharepoint';
+  const isPowerPages = resourceKind === 'powerpages';
   return {
     resource: resourceUrl,
-    resource_name: isIde ? 'Quicker Portal IDE MCP' : isSharePoint ? 'Quicker Portal SharePoint MCP' : 'Quicker Portal Power Platform MCP',
+    resource_name: isIde ? 'Quicker Portal IDE MCP' : isSharePoint ? 'Quicker Portal SharePoint MCP' : isPowerPages ? 'Quicker Portal Power Pages MCP' : 'Quicker Portal Power Platform MCP',
     authorization_servers: [serviceBaseUrl.replace(/\/+$/, '')],
     scopes_supported: ['mcp:read', 'mcp:write', 'offline_access'],
     bearer_methods_supported: ['header'],
-    resource_documentation: `${serviceBaseUrl.replace(/\/+$/, '')}${isIde ? '/api/ide/bootstrap' : isSharePoint ? '/api/mcp/sharepoint/bootstrap' : '/api/mcp/connections'}`,
-    quicker_portal_authentication: isIde || isSharePoint
+    resource_documentation: `${serviceBaseUrl.replace(/\/+$/, '')}${isIde ? '/api/ide/bootstrap' : isSharePoint ? '/api/mcp/sharepoint/bootstrap' : isPowerPages ? '/api/mcp/powerpages/bootstrap' : '/api/mcp/connections'}`,
+    quicker_portal_authentication: isIde || isSharePoint || isPowerPages
       ? 'oauth-2.1-pkce-with-premium-quicker-portal-account'
       : 'oauth-2.1-pkce-or-tenant-scoped-static-bearer-key',
-    ...(isSharePoint ? { sharepoint_authentication: 'connected-quicker-portal-desktop-browser-session; no customer app registration required' } : {})
+    ...(isSharePoint ? { sharepoint_authentication: 'connected-quicker-portal-desktop-browser-session; no customer app registration required' } : {}),
+    ...(isPowerPages ? { power_pages_execution: 'selected-quicker-portal-desktop-environment-with-local-write-approval' } : {})
   };
 }

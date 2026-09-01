@@ -148,6 +148,7 @@ test('QP OAuth, bridge, workspace reads, and writes work end to end', async () =
 
   const currentRevision = '1111111111111111';
   const nextRevision = '2222222222222222';
+  const gitignoreRevision = '3333333333333333';
   let content = 'console.log("hello");\n';
   socket.on('message', raw => {
     const frame = JSON.parse(raw.toString('utf8'));
@@ -165,8 +166,27 @@ test('QP OAuth, bridge, workspace reads, and writes work end to end', async () =
         result: { results: [{ ok: true, path: 'hello.js', action: 'update', revision: nextRevision, size: Buffer.byteLength(content), mtime: Date.now() }] }
       }));
     }
+    if (frame.method === 'ensureGitignore') {
+      const addition = { pattern: 'node_modules/', why: 'npm dependencies', source: 'project' };
+      socket.send(JSON.stringify({
+        t: 'res', id: frame.id, ok: true,
+        result: {
+          ok: true,
+          mode: frame.params.mode,
+          hasGitignore: false,
+          ecosystems: [{ id: 'node', name: 'Node.js' }],
+          additions: [addition],
+          alreadyCovered: [],
+          truncated: false,
+          applied: Boolean(frame.params.apply),
+          ...(frame.params.apply
+            ? { write: { ok: true, path: '.gitignore', action: 'create', revision: gitignoreRevision, size: 128, mtime: Date.now() } }
+            : {})
+        }
+      }));
+    }
   });
-  socket.send(JSON.stringify({ t: 'hello', info: { platform: 'darwin', appVersion: '1.0.0', capabilities: ['describeEnvironment', 'gitCheckpoint', 'installPrompt', 'boundedApproval'] } }));
+  socket.send(JSON.stringify({ t: 'hello', info: { platform: 'darwin', appVersion: '1.0.0', capabilities: ['describeEnvironment', 'gitCheckpoint', 'ensureGitignore', 'installPrompt', 'boundedApproval'] } }));
   const registeredPromise = waitForFrame(socket, frame => frame.t === 'event' && frame.event === 'workspace-registered');
   socket.send(JSON.stringify({ t: 'event', event: 'workspace-opened', localId: 'local-1', name: 'hello-project', rootPath: '/tmp/hello-project', kind: 'folder' }));
   const registered = await registeredPromise;
@@ -189,6 +209,14 @@ test('QP OAuth, bridge, workspace reads, and writes work end to end', async () =
   assert.equal(initialized.response.status, 200, JSON.stringify(initialized.body));
   const mcpSessionId = initialized.response.headers.get('mcp-session-id');
   assert.ok(mcpSessionId);
+
+  const tools = await mcpCall(bootstrap.mcpUrl, tokens.access_token, {
+    jsonrpc: '2.0', id: 20, method: 'tools/list', params: {}
+  }, mcpSessionId);
+  assert.ok(
+    tools.body?.result?.tools?.some(tool => tool.name === 'ensure_gitignore'),
+    'the MCP client needs a named dependency-hygiene tool'
+  );
 
   const refreshForm = new URLSearchParams({
     grant_type: 'refresh_token',
@@ -226,6 +254,33 @@ test('QP OAuth, bridge, workspace reads, and writes work end to end', async () =
     params: { name: 'read_files', arguments: { workspaceId: registered.workspaceId, paths: ['hello.js'] } }
   }, mcpSessionId);
   assert.equal(read.body.result.structuredContent.files[0].content, content);
+
+  const blockedInstall = await mcpCall(bootstrap.mcpUrl, refreshed.access_token, {
+    jsonrpc: '2.0', id: 29, method: 'tools/call',
+    params: {
+      name: 'run_command',
+      arguments: { workspaceId: registered.workspaceId, argv: ['npm', 'install'] }
+    }
+  }, mcpSessionId);
+  assert.equal(blockedInstall.body.result.isError, true, JSON.stringify(blockedInstall.body));
+  assert.equal(blockedInstall.body.result.structuredContent.error, 'GITIGNORE_REVIEW_REQUIRED');
+
+  const ignored = await mcpCall(bootstrap.mcpUrl, refreshed.access_token, {
+    jsonrpc: '2.0', id: 30, method: 'tools/call',
+    params: {
+      name: 'ensure_gitignore',
+      arguments: {
+        workspaceId: registered.workspaceId,
+        mode: 'project',
+        apply: true,
+        reason: 'Prepare for dependency installation'
+      }
+    }
+  }, mcpSessionId);
+  assert.notEqual(ignored.body.result.isError, true, JSON.stringify(ignored.body));
+  assert.equal(ignored.body.result.structuredContent.applied, true);
+  assert.equal(ignored.body.result.structuredContent.write.path, '.gitignore');
+  assert.equal(ignored.body.result.structuredContent.write.revision, gitignoreRevision);
 
   const updatedContent = 'console.log("updated");\n';
   const written = await mcpCall(bootstrap.mcpUrl, refreshed.access_token, {

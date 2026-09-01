@@ -63,9 +63,18 @@ test('tool discovery metadata remains within its regression budget', () => {
     // Each OAuth resource discovers only its own catalog and protocol.js
     // byte-paginates that catalog at 48 KiB. Measure the actual wire surfaces,
     // not the combined in-process registry that no client can request.
-    const aggregateBudget = group === 'power-platform' ? 108 * 1024 : 24 * 1024;
+    // SharePoint now advertises a complete typed list/column lifecycle. Its 26
+    // tools intentionally span two discovery pages; no client receives the
+    // aggregate in one response. Keep a bounded total as a regression signal,
+    // then independently enforce the actual 20-tool / 48 KiB wire-page limit.
+    const aggregateBudget = group === 'power-platform' ? 108 * 1024 : 40 * 1024;
+    const averageBudget = group === 'power-platform' ? 1_200 : 1_400;
     assert.ok(totalBytes < aggregateBudget, `${group} MCP catalog regressed to ${totalBytes} bytes.`);
-    assert.ok(totalBytes / advertised.length < 1_200, `${group} average MCP descriptor regressed to ${Math.ceil(totalBytes / advertised.length)} bytes.`);
+    assert.ok(totalBytes / advertised.length < averageBudget, `${group} average MCP descriptor regressed to ${Math.ceil(totalBytes / advertised.length)} bytes.`);
     assert.ok(largest < 8 * 1024, `An individual ${group} MCP tool descriptor regressed to ${largest} bytes.`);
+    for (let offset = 0; offset < advertised.length; offset += 20) {
+      const pageBytes = advertised.slice(offset, offset + 20).reduce((total, item) => total + Buffer.byteLength(JSON.stringify(item)), 0);
+      assert.ok(pageBytes < 48 * 1024, `${group} MCP discovery page regressed to ${pageBytes} bytes.`);
+    }
   }
 });

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { useTemporaryDataDir, startTestServer, readLatestCode, VALID_PASSWORD } from './helpers/test-server.js';
 import { sharePointMcpConnectionSeed } from '../src/modules/mcp/connections.js';
+import { MCP_TOOL_BY_NAME } from '../src/modules/mcp/tool-catalog.js';
 
 const dataDir = useTemporaryDataDir();
 const server = await startTestServer();
@@ -13,6 +14,19 @@ test('SharePoint Mongo upsert operators never write the same path', () => {
   assert.deepEqual(Object.keys(seed.activation).sort(), ['enabled', 'revokedAt']);
   assert.deepEqual(Object.keys(seed.activation).filter(key => Object.hasOwn(seed.insertOnly, key)), []);
   assert.equal(seed.insertOnly.kind, 'sharepoint');
+});
+
+test('SharePoint list and column lifecycle tools are explicit and governed', () => {
+  for (const name of [
+    'get_sharepoint_list', 'create_sharepoint_list', 'update_sharepoint_list', 'delete_sharepoint_list',
+    'get_sharepoint_column', 'create_sharepoint_column', 'update_sharepoint_column', 'delete_sharepoint_column'
+  ]) assert.equal(MCP_TOOL_BY_NAME.get(name)?.group, 'sharepoint', name);
+  assert.equal(MCP_TOOL_BY_NAME.get('delete_sharepoint_list').risk, 'destructive');
+  assert.equal(MCP_TOOL_BY_NAME.get('delete_sharepoint_column').risk, 'destructive');
+  assert.equal(MCP_TOOL_BY_NAME.get('create_sharepoint_column').inputSchema.properties.definition.additionalProperties, false);
+  assert.deepEqual(MCP_TOOL_BY_NAME.get('create_sharepoint_column').inputSchema.properties.definition.properties.type.enum, [
+    'text', 'multilineText', 'number', 'currency', 'boolean', 'choice', 'multiChoice', 'dateTime', 'hyperlink', 'person', 'lookup'
+  ]);
 });
 
 async function register(username, planId) {
@@ -117,12 +131,24 @@ test('SharePoint MCP exposes only SharePoint tools and executes through its desk
   assert.equal(initialized.body.result.serverInfo.name, 'Quicker Portal SharePoint MCP');
   assert.match(initialized.body.result.instructions, /never ask for tenant IDs/i);
 
-  const listed = await mcpCall(bootstrap.mcpUrl, tokens.access_token, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
-  const names = listed.body.result.tools.map(tool => tool.name);
-  assert.ok(names.length >= 18, JSON.stringify(names));
+  const listedTools = [];
+  let cursor;
+  do {
+    const listed = await mcpCall(bootstrap.mcpUrl, tokens.access_token, {
+      jsonrpc: '2.0', id: `tools-${listedTools.length}`, method: 'tools/list', params: cursor ? { cursor } : {}
+    });
+    assert.equal(listed.response.status, 200, JSON.stringify(listed.body));
+    listedTools.push(...listed.body.result.tools);
+    cursor = listed.body.result.nextCursor;
+  } while (cursor);
+  const names = listedTools.map(tool => tool.name);
+  assert.ok(names.length >= 26, JSON.stringify(names));
   assert.ok(names.every(name => name.includes('sharepoint')));
   assert.ok(names.includes('patch_sharepoint_file'));
   assert.ok(names.includes('update_sharepoint_list_item'));
+  assert.ok(names.includes('create_sharepoint_list'));
+  assert.ok(names.includes('update_sharepoint_column'));
+  assert.ok(names.includes('delete_sharepoint_column'));
   assert.ok(!names.includes('create_table'));
 
   const forbiddenCrossResource = await mcpCall(bootstrap.mcpUrl, tokens.access_token, {
@@ -150,4 +176,27 @@ test('SharePoint MCP exposes only SharePoint tools and executes through its desk
   assert.equal(call.body.result.isError, false, JSON.stringify(call.body));
   assert.equal(call.body.result.structuredContent.connected, true);
   assert.equal(call.body.result.structuredContent.appRegistrationRequired, false);
+
+  const pendingCreate = mcpCall(bootstrap.mcpUrl, tokens.access_token, {
+    jsonrpc: '2.0', id: 5, method: 'tools/call', params: {
+      name: 'create_sharepoint_list',
+      arguments: { siteId: 'site-1', displayName: 'MCP Projects', description: 'Created through the governed relay', template: 'genericList' }
+    }
+  });
+  let createJob;
+  for (let attempt = 0; attempt < 30 && !createJob; attempt += 1) {
+    const jobs = await server.call('GET', '/api/mcp/bridge/jobs?tenantId=sharepoint&environmentId=sharepoint&clientInstanceId=sp-desktop-test&limit=1', undefined, { accessToken: session.accessToken });
+    createJob = jobs.body.jobs?.[0];
+    if (!createJob) await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  assert.equal(createJob?.action, 'mcpSharePointCreateList');
+  assert.equal(createJob?.arguments?.displayName, 'MCP Projects');
+  const createCompleted = await server.call('POST', `/api/mcp/bridge/jobs/${encodeURIComponent(createJob.id)}/complete`, {
+    leaseToken: createJob.leaseToken,
+    result: { ok: true, result: { id: 'list-1', displayName: 'MCP Projects', list: { template: 'genericList' } } }
+  }, { accessToken: session.accessToken });
+  assert.equal(createCompleted.status, 200, JSON.stringify(createCompleted.body));
+  const createCall = await pendingCreate;
+  assert.equal(createCall.body.result.isError, false, JSON.stringify(createCall.body));
+  assert.equal(createCall.body.result.structuredContent.displayName, 'MCP Projects');
 });

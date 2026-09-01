@@ -64,7 +64,53 @@ const sharePointDriveId = string('Drive or document-library ID returned by a Sha
 const sharePointItemId = string('Drive-item ID returned by a SharePoint read tool.');
 const sharePointSiteId = string('SharePoint site ID returned by search_sharepoint_sites or get_sharepoint_connection.');
 const sharePointListId = string('SharePoint list ID returned by get_sharepoint_site.');
+const sharePointColumnId = string('SharePoint column ID returned by list_sharepoint_columns or get_sharepoint_column.');
 const sharePointFields = { type: 'object', description: 'SharePoint list fields keyed by internal column name. Preserve fields you are not changing.', additionalProperties: true };
+const sharePointListTemplate = { type: 'string', enum: ['genericList', 'documentLibrary', 'links', 'announcements', 'contacts', 'events', 'tasks'], description: 'Supported SharePoint list template. Use genericList unless the user requests a specific template.' };
+const sharePointColumnType = { type: 'string', enum: ['text', 'multilineText', 'number', 'currency', 'boolean', 'choice', 'multiChoice', 'dateTime', 'hyperlink', 'person', 'lookup'], description: 'Supported SharePoint column type.' };
+const sharePointColumnProperties = {
+  displayName: string('User-facing column name.'),
+  description: string('Optional column description.'),
+  required: boolean('Whether SharePoint requires a value.'),
+  indexed: boolean('Whether SharePoint indexes this column.'),
+  enforceUniqueValues: boolean('Whether SharePoint enforces unique values. This also enables indexing.'),
+  choices: array(string('One allowed choice.'), 'Allowed values for choice and multiChoice columns.', { minItems: 1, maxItems: 200 }),
+  allowTextEntry: boolean('Allow a value outside the defined choices.'),
+  displayAs: { type: 'string', enum: ['dropDownMenu', 'radioButtons', 'checkBoxes'], description: 'Choice presentation.' },
+  maxLength: number('Maximum text length from 1 to 255.', { minimum: 1, maximum: 255 }),
+  allowMultipleLines: boolean('Use a multi-line text editor.'),
+  appendChanges: boolean('Append changes to existing multi-line text.'),
+  linesForEditing: number('Visible editor lines.', { minimum: 1, maximum: 100 }),
+  richText: boolean('Enable rich text for multi-line content.'),
+  minimum: number('Optional numeric minimum.'),
+  maximum: number('Optional numeric maximum.'),
+  decimalPlaces: number('Numeric precision from 0 to 5.', { minimum: 0, maximum: 5 }),
+  dateOnly: boolean('Store and display a date without time.'),
+  isPicture: boolean('Render a hyperlink column as an image.'),
+  allowMultipleValues: boolean('Allow multiple people or lookup values.'),
+  peopleOnly: boolean('For person columns, exclude SharePoint groups.'),
+  lookupListId: string('Target SharePoint list GUID for a lookup column.'),
+  lookupColumnName: string('Target internal column name for a lookup column, usually Title.')
+};
+const sharePointColumnDefinition = object({
+  name: string('Stable internal name using letters, numbers, and underscores.'),
+  type: sharePointColumnType,
+  ...sharePointColumnProperties
+}, ['name', 'type', 'displayName']);
+const sharePointColumnChanges = object(Object.fromEntries(
+  Object.entries(sharePointColumnProperties).filter(([name]) => !['lookupListId', 'lookupColumnName'].includes(name))
+));
+const powerPagesOptions = { group: 'powerpages' };
+const powerPagesWriteOptions = { group: 'powerpages', readOnly: false };
+const powerPagesDestructiveOptions = { group: 'powerpages', readOnly: false, destructive: true };
+const powerPagesSiteId = string('Power Pages website ID returned by list_power_pages_sites.');
+const powerPagesComponentId = string('Dataverse component GUID returned by list_power_pages_components or inspect_power_pages_inventory.');
+const powerPagesComponentType = {
+  type: 'string',
+  enum: ['publishingState','webPage','webFile','webLinkSet','webLink','pageTemplate','contentSnippet','webTemplate','siteSetting','pageAccessRule','webRole','websiteAccess','siteMarker','basicForm','basicFormMetadata','list','tablePermission','advancedForm','advancedFormStep','advancedFormMetadata','pollPlacement','adPlacement','botConsumer','columnPermissionProfile','columnPermission','redirect','publishingTransitionRule','shortcut','cloudFlow','uxComponent'],
+  description: 'Power Pages component family. The desktop resolves standard adx_* or enhanced powerpagecomponent storage automatically.'
+};
+const powerPagesValues = { type: 'object', description: 'Only the component or operation fields to create/change. Dataverse lookup binds are supported where required.', additionalProperties: true };
 // Canvas authoring has many small, purpose-specific tools. Keep their repeated
 // fields compact so the paged tools/list response stays inexpensive without
 // sacrificing the operation-specific guidance models need.
@@ -352,6 +398,58 @@ export const MCP_TOOLS = Object.freeze([
   }, ['rollbackToken', 'confirm']), { readOnly: false, destructive: true, timeoutMs: 120_000 }),
   tool('deploy_command_bar_definition', 'deployRibbonDiff', 'Validate and deploy table RibbonDiffXml through Quicker Portal Command Workbench with rollback support.', object({ logicalName: tableName, metadataId: string('Table metadata GUID returned by list_command_bar_targets.'), ribbonDiffXml: string('Complete RibbonDiffXml payload.'), solutionUniqueName: string('Unmanaged solution unique name.'), confirm: boolean('Confirm deploying and publishing command bar customization.') }, ['logicalName', 'metadataId', 'ribbonDiffXml', 'solutionUniqueName', 'confirm']), { readOnly: false, timeoutMs: 120_000 }),
 
+  // Power Pages is a dedicated OAuth resource. The compact domain catalog is
+  // deliberate: models choose more reliably between a few typed operations
+  // than dozens of near-identical table tools, while operation enums still
+  // cover every supported component and administration surface.
+  tool('get_power_pages_connection', 'powerPagesRead', 'Get the selected desktop environment and supported Power Pages component catalog. Call this first.', object(), { ...powerPagesOptions, fixedArguments: { operation: 'connection' } }),
+  tool('list_power_pages_sites', 'powerPagesRead', 'List Power Pages websites in the selected environment with URL, status, type, visibility, package, language, and Dataverse record ID.', object({ skip: number('Pagination offset.', { minimum: 0 }) }), { ...powerPagesOptions, fixedArguments: { operation: 'listSites' } }),
+  tool('create_power_pages_site', 'powerPagesWrite', 'Provision a new Power Pages website using the documented Power Platform API. Confirm the selected environment, name, subdomain, language, and template with the user before calling.', object({
+    dataverseOrganizationId: string('Dataverse organization GUID for the selected environment.'),
+    name: string('Display name for the new site.'),
+    selectedBaseLanguage: number('Power Pages language LCID, for example 1033 for English.', { minimum: 1 }),
+    subdomain: string('Unique Power Pages subdomain without protocol or path.'),
+    templateName: { type:'string', enum:['DefaultPortalTemplate','PowerPortals_ProgramRegistration','PowerPortals_BookMeeting'] },
+    websiteRecordId: string('Optional existing Dataverse website record GUID.')
+  }, ['dataverseOrganizationId','name','selectedBaseLanguage','subdomain','templateName']), { ...powerPagesWriteOptions, fixedArguments: { operation: 'createSite' }, timeoutMs: 120_000 }),
+  tool('get_power_pages_site', 'powerPagesRead', 'Read one current website and detect whether it uses the standard or enhanced data model.', object({ siteId: powerPagesSiteId }, ['siteId']), { ...powerPagesOptions, fixedArguments: { operation: 'getSite' } }),
+  tool('inspect_power_pages_inventory', 'powerPagesRead', 'Inventory all supported site component families and return counts, current IDs, state, and model-detection warnings.', object({ siteId: powerPagesSiteId, limit: number('Maximum records per component family.', { minimum: 1, maximum: 500 }) }, ['siteId']), { ...powerPagesOptions, fixedArguments: { operation: 'inventory' }, timeoutMs: 90_000 }),
+  tool('list_power_pages_components', 'powerPagesRead', 'List a bounded current set of one component family, or all families when componentType is omitted.', object({ siteId: powerPagesSiteId, componentType: powerPagesComponentType, limit: number('Bounded row count.', { minimum: 1, maximum: 500 }) }, ['siteId']), { ...powerPagesOptions, fixedArguments: { operation: 'listComponents' }, timeoutMs: 90_000 }),
+  tool('read_power_pages_component', 'powerPagesRead', 'Read the complete current component and receive its SHA-256 revision. Always call immediately before update or delete.', object({ siteId: powerPagesSiteId, componentType: powerPagesComponentType, componentId: powerPagesComponentId }, ['siteId','componentType','componentId']), { ...powerPagesOptions, fixedArguments: { operation: 'readComponent' } }),
+  tool('create_power_pages_component', 'powerPagesWrite', 'Create a page, file, template, snippet, link, form, list, permission, role, access rule, redirect, flow, UX component, or other supported site component. The desktop writes to the correct data model.', object({ siteId: powerPagesSiteId, componentType: powerPagesComponentType, name: string('Component name.'), values: powerPagesValues }, ['siteId','componentType','values']), { ...powerPagesWriteOptions, fixedArguments: { operation: 'createComponent' } }),
+  tool('update_power_pages_component', 'powerPagesWrite', 'Apply only supplied fields to a current component. Enhanced-model content is merged locally; unchanged content is preserved. Requires a fresh revision.', object({ siteId: powerPagesSiteId, componentType: powerPagesComponentType, componentId: powerPagesComponentId, expectedRevision: string('Required SHA-256 from read_power_pages_component.'), changes: powerPagesValues }, ['siteId','componentType','componentId','expectedRevision','changes']), { ...powerPagesWriteOptions, fixedArguments: { operation: 'updateComponent' }, idempotent: true }),
+  tool('delete_power_pages_component', 'powerPagesDelete', 'Delete one current site component after a fresh read and explicit user confirmation.', object({ siteId: powerPagesSiteId, componentType: powerPagesComponentType, componentId: powerPagesComponentId, expectedRevision: string('Required SHA-256 from read_power_pages_component.'), confirm }, ['siteId','componentType','componentId','expectedRevision','confirm']), { ...powerPagesDestructiveOptions, fixedArguments: { operation: 'deleteComponent' } }),
+  tool('inspect_power_pages_security', 'powerPagesRead', 'Read one current security or domain surface.', object({
+    siteId: powerPagesSiteId,
+    operation: { type:'string', enum:['getIpRestrictions','listDomains','listCertificates','listSslBindings','getWafStatus','getWafRules','getSecurityScanScore','getSecurityScanReport'] },
+    hostName: string('Hostname required for SSL bindings.'),
+    certType: { type:'string', enum:['SSL','MANAGED'] }
+  }, ['siteId','operation']), powerPagesOptions),
+  tool('manage_power_pages_site', 'powerPagesWrite', 'Start, stop, restart, convert, or scan a site. Use get_power_pages_site first.', object({
+    siteId: powerPagesSiteId,
+    operation: { type:'string', enum:['startSite','stopSite','restartSite','convertTrial','startQuickScan','startDeepScan'] },
+    values: powerPagesValues
+  }, ['siteId','operation']), powerPagesWriteOptions),
+  tool('configure_power_pages_security', 'powerPagesWrite', 'Configure visibility, security group, WAF, IP restrictions, domain, certificate, SSL binding, AFD routing, Bootstrap V5, or data-model stamp. Send only fields required by the selected operation.', object({
+    siteId: powerPagesSiteId,
+    operation: { type:'string', enum:['setVisibility','setSecurityGroup','enableWaf','disableWaf','replaceWafRules','updateWafPolicy','addIpRestrictions','addDomain','uploadCertificate','addSslBinding','toggleAfd','setBootstrapV5','setDataModel'] },
+    siteVisibility:string('public or private.'), securityGroupId:string('Optional Entra security group GUID.'), hostName:string('Custom hostname.'), thumbprint:string('Certificate thumbprint.'), enabled:boolean('Toggle value.'),
+    lcid:string('Optional language code for a quick scan.'), certType:{type:'string',enum:['SSL','MANAGED']},
+    certificateBase64:string('Base64-encoded .pfx content for uploadCertificate. The desktop sends it as multipart form data and never returns it.'),
+    password:string('Certificate password for uploadCertificate. It is redacted from local approval previews and transmission payload display.'),
+    fileName:string('Optional .pfx file name.'),
+    ipAddresses:array(object({ IpAddress:string('IPv4, IPv6, or CIDR.'), IpAddressType:{type:'string',enum:['IPv4','IPv6']} }, ['IpAddress','IpAddressType']), 'IP allow-list entries.'),
+    values:powerPagesValues
+  }, ['siteId','operation']), powerPagesWriteOptions),
+  tool('remove_power_pages_security_configuration', 'powerPagesDelete', 'Remove IP entries, a domain, certificate, SSL binding, or WAF custom rules after explicit confirmation.', object({
+    siteId:powerPagesSiteId,
+    operation:{type:'string',enum:['removeIpRestrictions','removeDomain','deleteCertificate','deleteSslBinding','deleteWafRules']},
+    hostName:string('Hostname to remove.'), thumbprint:string('Certificate thumbprint.'), certType:{type:'string',enum:['SSL','MANAGED']},
+    ipAddresses:array(object({IpAddress:string('IPv4, IPv6, or CIDR.'),IpAddressType:{type:'string',enum:['IPv4','IPv6']}},['IpAddress','IpAddressType']),'Entries to remove.'),
+    ruleNames:array(string('Exact WAF custom rule name returned by inspect_power_pages_security.'), 'WAF custom rules to remove.'), values:powerPagesValues, confirm
+  }, ['siteId','operation','confirm']), powerPagesDestructiveOptions),
+  tool('delete_power_pages_site', 'powerPagesDelete', 'Delete a Power Pages website after a current site read and explicit confirmation.', object({ siteId:powerPagesSiteId, confirm }, ['siteId','confirm']), { ...powerPagesDestructiveOptions, fixedArguments:{ operation:'deleteSite' } }),
+
   // SharePoint MCP is intentionally a separate OAuth resource. These tools
   // execute only against the SharePoint site already connected in the user's
   // desktop browser session; no customer tenant ID, client secret, or app
@@ -393,7 +491,31 @@ export const MCP_TOOLS = Object.freeze([
     edits: array(anchoredTextEdit, 'One or more exact, non-overlapping text edits.', { minItems: 1, maxItems: 100 })
   }, ['driveId', 'itemId', 'expectedRevision', 'edits']), { ...sharePointWriteOptions, idempotent: true }),
   tool('delete_sharepoint_drive_item', 'mcpSharePointDeleteDriveItem', 'Delete one SharePoint file or folder after explicit user confirmation. Re-list the parent first so the ID and target are current.', object({ driveId: sharePointDriveId, itemId: sharePointItemId, confirm }, ['driveId', 'itemId', 'confirm']), sharePointDestructiveOptions),
-  tool('list_sharepoint_columns', 'mcpSharePointListSchema', 'Read the current column schema for one SharePoint list. Use internal names—not display labels—for list-item fields.', object({ siteId: sharePointSiteId, listId: sharePointListId }, ['siteId', 'listId']), sharePointOptions),
+  tool('get_sharepoint_list', 'mcpSharePointGetList', 'Read the latest SharePoint list definition and ETag before changing or deleting it.', object({ siteId: sharePointSiteId, listId: sharePointListId }, ['siteId', 'listId']), sharePointOptions),
+  tool('create_sharepoint_list', 'mcpSharePointCreateList', 'Create one SharePoint list or document library in the connected site. Create columns separately so every schema change is independently reviewable.', object({
+    siteId: sharePointSiteId,
+    displayName: string('New list name.'),
+    description: string('Optional list description.'),
+    template: sharePointListTemplate
+  }, ['siteId', 'displayName']), sharePointWriteOptions),
+  tool('update_sharepoint_list', 'mcpSharePointUpdateList', 'Update only the supplied list name or description. Call get_sharepoint_list immediately first and pass its ETag when one is returned.', object({
+    siteId: sharePointSiteId,
+    listId: sharePointListId,
+    expectedETag: string('ETag returned by get_sharepoint_list; omit only when the read explicitly returns no ETag.'),
+    changes: object({ displayName: string('New list name.'), description: string('New list description.') })
+  }, ['siteId', 'listId', 'changes']), { ...sharePointWriteOptions, idempotent: true }),
+  tool('delete_sharepoint_list', 'mcpSharePointDeleteList', 'Delete or recycle one current SharePoint list after an exact current-state read and explicit user confirmation.', object({ siteId: sharePointSiteId, listId: sharePointListId, confirm }, ['siteId', 'listId', 'confirm']), sharePointDestructiveOptions),
+  tool('list_sharepoint_columns', 'mcpSharePointListSchema', 'Read the current column schema for one SharePoint list. Use internal names—not display labels—for list-item fields.', object({ siteId: sharePointSiteId, listId: sharePointListId, includeHidden: boolean('Include hidden and system columns.') }, ['siteId', 'listId']), sharePointOptions),
+  tool('get_sharepoint_column', 'mcpSharePointGetColumn', 'Read the latest complete definition and ETag for one SharePoint column before updating or deleting it.', object({ siteId: sharePointSiteId, listId: sharePointListId, columnId: sharePointColumnId }, ['siteId', 'listId', 'columnId']), sharePointOptions),
+  tool('create_sharepoint_column', 'mcpSharePointCreateColumn', 'Create one validated column on a current SharePoint list. Use list_sharepoint_columns first to avoid duplicate internal names.', object({ siteId: sharePointSiteId, listId: sharePointListId, definition: sharePointColumnDefinition }, ['siteId', 'listId', 'definition']), sharePointWriteOptions),
+  tool('update_sharepoint_column', 'mcpSharePointUpdateColumn', 'Update only supported mutable properties on one existing SharePoint column. Column type and internal name are intentionally immutable. Read it first and pass its ETag when available.', object({
+    siteId: sharePointSiteId,
+    listId: sharePointListId,
+    columnId: sharePointColumnId,
+    expectedETag: string('ETag returned by get_sharepoint_column; omit only when unavailable.'),
+    changes: sharePointColumnChanges
+  }, ['siteId', 'listId', 'columnId', 'changes']), { ...sharePointWriteOptions, idempotent: true }),
+  tool('delete_sharepoint_column', 'mcpSharePointDeleteColumn', 'Delete one non-system SharePoint column after a current-state read and explicit user confirmation.', object({ siteId: sharePointSiteId, listId: sharePointListId, columnId: sharePointColumnId, confirm }, ['siteId', 'listId', 'columnId', 'confirm']), sharePointDestructiveOptions),
   tool('list_sharepoint_list_items', 'mcpSharePointListItems', 'Read a bounded page of SharePoint list items. Follow nextLink for additional pages and avoid broad reads when a specific item is known.', object({
     siteId: sharePointSiteId,
     listId: sharePointListId,

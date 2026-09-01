@@ -151,6 +151,8 @@ async function executeTool(ctx, connection, tool, args, id, resourceKind = 'powe
     return jsonRpcError(id, -32002, 'Quicker Portal desktop is offline.', {
       remediation: resourceKind === 'sharepoint'
         ? 'Open Quicker Portal, sign in with this Premium account, then connect the SharePoint site from SharePoint MCP. Keep the desktop app running while the AI works.'
+        : resourceKind === 'powerpages'
+        ? 'Open Quicker Portal, sign in with this Premium account, select the configured Dataverse environment, and keep Power Pages MCP open while the AI works.'
         : mismatch
         ? `The desktop is connected to ${desktop.environmentName || desktop.environmentId || 'another environment'}. Select the environment configured for this MCP connection and retry.`
         : 'Open Quicker Portal, sign in with this Quicker Portal account, and select the configured tenant/environment.',
@@ -198,7 +200,7 @@ export async function handleMcpRequest(ctx, { scopedToolName, resourceKind = 'po
 
   let connection;
   try {
-    const endpointTenantId = resourceKind === 'sharepoint' ? 'sharepoint' : ctx.params.tenantId;
+    const endpointTenantId = resourceKind === 'sharepoint' ? 'sharepoint' : resourceKind === 'powerpages' ? `powerpages:${ctx.params.tenantId}` : ctx.params.tenantId;
     const authorization = String(ctx.req.headers.authorization || '');
     connection = resourceKind === 'power-platform' && authorization.startsWith('Bearer qpmcp.')
       ? await authenticateMcpConnection({ userId: ctx.params.userId, tenantId: endpointTenantId, authorization })
@@ -242,6 +244,7 @@ export async function handleMcpRequest(ctx, { scopedToolName, resourceKind = 'po
   const isNotification = body.id === undefined || body.id === null;
   const resourceTools = MCP_TOOLS.filter(tool => tool.group === resourceKind);
   const isSharePoint = resourceKind === 'sharepoint';
+  const isPowerPages = resourceKind === 'powerpages';
 
   if (body.method === 'initialize') {
     const requested = String(body.params?.protocolVersion || LATEST_PROTOCOL);
@@ -256,9 +259,13 @@ export async function handleMcpRequest(ctx, { scopedToolName, resourceKind = 'po
       capabilities: { tools: { listChanged: false }, resources: { subscribe: false, listChanged: false } },
       serverInfo: isSharePoint
         ? { name: 'Quicker Portal SharePoint MCP', version: '1.0.0', description: 'Safely reads and updates the SharePoint site connected in the user’s Quicker Portal desktop.' }
+        : isPowerPages
+        ? { name: 'Quicker Portal Power Pages MCP', version: '1.0.0', description: 'Builds and operates Power Pages sites through the selected Quicker Portal desktop environment.' }
         : { name: 'Quicker Portal Power Platform MCP', version: '1.0.0', description: 'Executes Power Platform operations through the user-connected Quicker Portal desktop.' },
       instructions: isSharePoint
-        ? 'The connected Quicker Portal desktop browser session is the only authoritative SharePoint identity and site. Never ask for tenant IDs, client IDs, client secrets, app registrations, Microsoft passwords, cookies, or access tokens. Start with get_sharepoint_connection. Discover current site, drive, list, and item IDs before acting. Read a file or list item immediately before every update. For text files use patch_sharepoint_file with the exact SHA-256 revision and targeted anchors returned by read_sharepoint_file; never ask the user to paste the complete file and never reconstruct unchanged content from memory. For list items, send only changed fields using internal column names and the current ETag. Follow paging links for large libraries and lists. Keep reads bounded. Preview the exact target in your response and use delete tools only after explicit user confirmation. If the desktop or SharePoint session is disconnected, explain that the user must reconnect it in Quicker Portal rather than requesting credentials.'
+        ? 'The connected Quicker Portal desktop browser session is the only authoritative SharePoint identity and site. Never ask for tenant IDs, client IDs, client secrets, app registrations, Microsoft passwords, cookies, or access tokens. Start with get_sharepoint_connection. Discover current site, drive, list, column, and item IDs before acting. Before changing a list, column, file, or list item, call its exact get/read tool immediately first and use the returned ETag or revision when available; stale writes must be re-read, never forced. For text files use patch_sharepoint_file with the exact SHA-256 revision and targeted anchors returned by read_sharepoint_file; never ask the user to paste the complete file and never reconstruct unchanged content from memory. For list items, send only changed fields using internal column names and the current ETag. Create a list first, then create each requested column with create_sharepoint_column; do not invent internal names or unsupported column types. Column type and internal name are immutable after creation, so create a replacement only after explaining the migration impact. Follow paging links for large libraries and lists. Keep reads bounded. Preview the exact target in your response and use delete tools only after explicit user confirmation. If the desktop or SharePoint session is disconnected, explain that the user must reconnect it in Quicker Portal rather than requesting credentials.'
+        : isPowerPages
+        ? 'The selected Quicker Portal desktop environment is authoritative. Start with get_power_pages_connection and list_power_pages_sites. Use create_power_pages_site only after confirming the exact environment, name, subdomain, base language, and template. Never assume whether a site uses the standard or enhanced model: get_power_pages_site or inspect_power_pages_inventory detects it. Before updating or deleting a component, call read_power_pages_component immediately first and pass its exact SHA-256 revision; stale writes must be re-read, never forced. Send only changed component fields. Do not ask the user to paste a complete site export. Components include pages, files, templates, snippets, links, forms, lists, table permissions, column permission profiles, roles, access rules, redirects, cloud flows, and UX components. Use site lifecycle and security tools only for documented operations. Certificate private material is accepted only for an explicit local-approved upload and is never returned by read tools. Treat site provisioning, public visibility, WAF, IP restrictions, domains, certificates, SSL, AFD routing, data-model changes, and deletion as high-impact. Explain the exact site and intended effect before writes; destructive calls require confirm=true and fresh current state. Do not claim completion until the desktop returns the operation result and a follow-up read confirms current state.'
         : 'The selected Quicker Portal desktop and tenant are authoritative. Read the latest component before changing it. For existing cloud flows, forms, views, text web resources, and Canvas source, use the patch_* tool: send only targeted operations or exact anchors, never ask the user for a complete artifact and never reconstruct unchanged content from memory. The desktop performs read-modify-validate-write with stale-write protection. Canvas authoring requires this sequence: get status, connect if needed, start sync and poll its operation, list/read/search the current .pa.yaml source, patch using the exact returned revision, review the pending diff, then start apply and poll until terminal. Never claim the Canvas app was updated unless the apply operation returns verified=true; compile success without canonical verification is not success. Use Microsoft discovery tools before choosing Canvas controls, APIs, data sources, or properties. Use complete update_* replacements only for explicit import or recovery. Table, column, row, app, environment-variable, connection-reference, plug-in-step, and command-bar updates already accept semantic partial changes. When creating two or more rows in one table, always use create_records once with the complete bounded array instead of repeatedly calling create_record; this produces one reviewed desktop operation and uses Dataverse bulk execution. PCF changes belong in source files and are deployed through the IDE/build/solution workflow. Minimize columns and row counts on reads. Preview and confirm destructive changes. Managed solution components may be read-only.'
     } }, { 'MCP-Protocol-Version': requested });
   }
@@ -285,19 +292,21 @@ export async function handleMcpRequest(ctx, { scopedToolName, resourceKind = 'po
   if (body.method === 'resources/list') {
     if (!hasScope(connection, 'mcp:read')) return sendMcpJson(ctx, 403, jsonRpcError(body.id, -32003, 'The access token needs mcp:read scope.'));
     return sendMcpJson(ctx, 200, { jsonrpc: '2.0', id: body.id, result: { resources: [{
-      uri: isSharePoint ? 'quickerportal://sharepoint/current-site' : `quickerportal://environment/${connection.tenantId}/${connection.environmentId}`,
-      name: connection.environmentName || connection.tenantName || (isSharePoint ? 'Connected SharePoint site' : 'Connected Power Platform environment'),
-      description: isSharePoint ? 'The SharePoint site currently connected in the user’s Quicker Portal desktop browser session.' : 'The live environment selected by the connected Quicker Portal desktop.',
+      uri: isSharePoint ? 'quickerportal://sharepoint/current-site' : isPowerPages ? `quickerportal://powerpages/${connection.environmentId}` : `quickerportal://environment/${connection.tenantId}/${connection.environmentId}`,
+      name: connection.environmentName || connection.tenantName || (isSharePoint ? 'Connected SharePoint site' : isPowerPages ? 'Power Pages environment' : 'Connected Power Platform environment'),
+      description: isSharePoint ? 'The SharePoint site currently connected in the user’s Quicker Portal desktop browser session.' : isPowerPages ? 'Power Pages sites in the selected live desktop environment.' : 'The live environment selected by the connected Quicker Portal desktop.',
       mimeType: 'application/json'
     }] } });
   }
   if (body.method === 'resources/read') {
     if (!hasScope(connection, 'mcp:read')) return sendMcpJson(ctx, 403, jsonRpcError(body.id, -32003, 'The access token needs mcp:read scope.'));
     return sendMcpJson(ctx, 200, { jsonrpc: '2.0', id: body.id, result: { contents: [{
-      uri: body.params?.uri || (isSharePoint ? 'quickerportal://sharepoint/current-site' : `quickerportal://environment/${connection.tenantId}/${connection.environmentId}`),
+      uri: body.params?.uri || (isSharePoint ? 'quickerportal://sharepoint/current-site' : isPowerPages ? `quickerportal://powerpages/${connection.environmentId}` : `quickerportal://environment/${connection.tenantId}/${connection.environmentId}`),
       mimeType: 'application/json',
       text: JSON.stringify(isSharePoint
         ? { resource: 'sharepoint', site: connection.environmentName, execution: 'connected-desktop-browser-session', appRegistrationRequired: false }
+        : isPowerPages
+        ? { resource: 'powerpages', environmentId: connection.environmentId, environmentName: connection.environmentName, execution: 'connected-desktop', modelDetection: 'automatic', localWriteApproval: true }
         : { tenantId: connection.tenantId, tenantName: connection.tenantName, environmentId: connection.environmentId, environmentName: connection.environmentName, execution: 'connected-desktop' }, null, 2)
     }] } });
   }
