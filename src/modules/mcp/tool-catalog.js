@@ -107,6 +107,29 @@ const choiceOption = object({
 const securityRecordKind = { type: 'string', enum: ['role', 'team', 'businessUnit', 'fieldSecurityProfile'], description: 'Security administration record type.' };
 const appAssetKind = { type: 'string', enum: ['form', 'view', 'dashboard', 'process', 'sitemap'], description: 'Model-driven app component family.' };
 const webResourceType = { type: 'number', enum: [1,2,3,4,5,6,7,8,9,10,11,12], description: 'Dataverse web-resource type: HTML, CSS, JavaScript, XML, PNG, JPG, GIF, Silverlight, XSL, ICO, SVG, or RESX.' };
+const bpfWorkflowId = string('Business Process Flow workflow GUID.');
+// clientdata is not a bag of Dataverse column values, and describing it as one
+// leads a model to send column names. It is the process object model, and its
+// real hierarchy is worth stating because there is no `StageStep` class in it -
+// a stage is a PageStep, and a step's bound column lives on its child
+// ControlStep.
+const bpfClientData = {
+  type: 'object',
+  description: 'Complete BPF clientdata document. WorkflowStep at the root, then one EntityStep per participating table, a PageStep per stage, a StepStep per step, and a ControlStep under each step carrying its dataFieldName. It must describe the same process as the XAML sent with it.',
+  additionalProperties: true
+};
+const bpfInclude = array(
+  { type: 'string', enum: ['summary', 'related', 'xaml', 'clientData', 'all'] },
+  'What to return. Defaults to summary and related. A real flow carries roughly 12 KB of XAML and 36 KB of clientdata, so request those only when composing an edit; their byte sizes are always reported either way.',
+  { maxItems: 5 }
+);
+const bpfMetadataChanges = object({
+  name: string('New display name.'),
+  description: string('New description.'),
+  processOrder: number('Order used when Dataverse selects a default eligible BPF.', { minimum: 1, maximum: 100000 }),
+  processRoleAssignment: string('Complete current Dataverse process role-assignment value. Preserve assignments not being changed.'),
+  scope: number('Dataverse workflow scope value.')
+});
 const dataverseBulkFields = {
   entitySet: string('Dataverse entity-set name.'),
   logicalName: tableName,
@@ -303,6 +326,65 @@ export const MCP_TOOLS = Object.freeze([
   tool('update_view', 'saveComponentDesigner', 'Complete FetchXML and LayoutXML replacement for import/recovery scenarios. Prefer patch_view for normal changes.', object({ id: string('Saved query GUID.'), fetchXml: string('Complete FetchXML query.'), layoutXml: string('Complete view grid LayoutXML.'), name: string('Optional view name.'), description: string('Optional description.'), publish: boolean('Publish the owning table after save.') }, ['id', 'fetchXml', 'layoutXml']), { readOnly: false, idempotent: true, fixedArguments: { kind: 'views' } }),
   tool('publish_view', 'publishComponentDesigner', 'Publish the table customizations containing a system view.', object({ id: string('Saved query GUID.'), target: tableName, confirm: boolean('Confirm publishing this view.') }, ['id', 'confirm']), { readOnly: false, idempotent: true, fixedArguments: { kind: 'views' } }),
   tool('delete_view', 'deleteComponentDesigner', 'Delete an unmanaged customizable system view and publish its table after explicit approval.', object({ id: string('Saved query GUID.'), publish: boolean('Publish after deletion; defaults to true.'), confirm }, ['id', 'confirm']), { readOnly: false, destructive: true, fixedArguments: { kind: 'views' } }),
+
+  tool('list_business_process_flows', 'developerAssets', 'List BPF definitions with primary table, order, state, managed status, and modified time.', object(), { fixedArguments: { kind: 'businessProcessFlows' } }),
+  tool('list_table_business_process_flows', 'businessProcessFlowsForTable', 'List BPFs using one table as primary or participating, with runtime selection order.', object({ tableLogicalName: tableName }, ['tableLogicalName'])),
+  tool('get_business_process_flow', 'businessProcessFlowDefinition', 'Read a BPF: metadata, a structural summary of its stages and steps, generated stage rows, app membership, form mappings, revision, and ETag. XAML and clientdata are omitted unless include asks for them. Call this before every edit and use the revision it returns.', object({ workflowId: bpfWorkflowId, include: bpfInclude }, ['workflowId'])),
+  tool('create_business_process_flow', 'createBusinessProcessFlow', 'Create a draft BPF and verify it was materialised. Prefer an existing category-4/type-3 template; supply a matched XAML and clientdata pair only for solution import or recovery.', object({
+    name: string('BPF display name.'),
+    uniqueName: string('Publisher-prefixed unique name for definition mode.'),
+    description: string('Optional description.'),
+    primaryTable: tableName,
+    templateWorkflowId: string('Optional BPF template workflow GUID. When supplied, XAML/clientdata are inherited by Dataverse.'),
+    xaml: string('Complete BPF XAML for definition mode. Omit when using a template.'),
+    clientData: bpfClientData,
+    businessProcessType: number('0 for a business flow, 1 for a task flow. Defaults to 0.', { minimum: 0, maximum: 1 }),
+    processOrder: number('Default process order.', { minimum: 1, maximum: 100000 }),
+    processRoleAssignment: string('Optional platform process role-assignment value.'),
+    scope: number('Workflow scope; defaults to organization.'),
+    languageCode: number('Language LCID; defaults to 1033.', { minimum: 1 }),
+    solutionUniqueName,
+    activate: boolean('Validate and activate after verified creation. Defaults to draft.')
+  }, ['name']), { readOnly: false, timeoutMs: 120_000 }),
+  tool('patch_business_process_flow', 'patchBusinessProcessFlow', 'Preferred BPF editor. Applies exact XAML anchors and JSON Pointer operations against the current definition, rejects stale revisions, saves both structural artifacts together, restores the previous state, and returns a rollback token.', object({
+    workflowId: bpfWorkflowId,
+    expectedRevision: string('Required SHA-256 revision from get_business_process_flow.'),
+    xamlEdits: array(anchoredTextEdit, 'Exact edits against current XAML. Structural edits require matching clientDataOperations.', { minItems: 1, maxItems: 128 }),
+    clientDataOperations: array(jsonPatchOperation, 'Targeted operations against parsed current BPF clientdata. Structural edits require matching xamlEdits.', { minItems: 1, maxItems: 128 }),
+    name: string('Optional new display name.'),
+    description: string('Optional new description.'),
+    processOrder: number('Optional new process order.', { minimum: 1, maximum: 100000 }),
+    processRoleAssignment: string('Optional complete process role-assignment value.'),
+    preserveState: boolean('Reactivate when the BPF was active; defaults to true.'),
+    activate: boolean('Activate after save even if previously draft. Pass false to leave it in draft even if it was active.'),
+    include: bpfInclude
+  }, ['workflowId', 'expectedRevision']), { readOnly: false, idempotent: true, timeoutMs: 120_000 }),
+  tool('update_business_process_flow', 'saveBusinessProcessFlow', 'Replace a complete matched XAML/clientdata pair for import or recovery, or update BPF metadata. Prefer patch_business_process_flow for normal edits.', object({
+    workflowId: bpfWorkflowId,
+    expectedRevision: string('Required SHA-256 revision from get_business_process_flow.'),
+    changes: bpfMetadataChanges,
+    xaml: string('Complete replacement XAML. Supply together with clientData.'),
+    clientData: bpfClientData,
+    preserveState: boolean('Reactivate when previously active; defaults to true.'),
+    activate: boolean('Activate after save. Pass false to leave it in draft even if it was active.'),
+    include: bpfInclude
+  }, ['workflowId', 'expectedRevision']), { readOnly: false, idempotent: true, timeoutMs: 120_000 }),
+  tool('validate_business_process_flow', 'validateBusinessProcessFlow', 'Validate BPF category, primary table, stages, steps, table limits, ordering, and app inclusion before activation.', object({ workflowId: bpfWorkflowId }, ['workflowId'])),
+  tool('set_business_process_flow_state', 'setBusinessProcessFlowState', 'Activate or deactivate a BPF. Activation runs structural validation first and Dataverse performs final compilation.', object({ workflowId: bpfWorkflowId, active: boolean('True to activate; false to return to draft.'), confirm: boolean('Confirm changing the live BPF state.') }, ['workflowId', 'active', 'confirm']), { readOnly: false, idempotent: true, timeoutMs: 120_000 }),
+  tool('get_business_process_flow_form_mapping_options', 'businessProcessFlowFormMappingOptions', 'Read eligible forms, existing mappings, app scope, and safety guidance before changing BPF form selection behavior.', object({ workflowId: bpfWorkflowId }, ['workflowId'])),
+  tool('apply_business_process_flow_form_mappings', 'applyBusinessProcessFlowFormMappings', 'Generate or update the guarded OnLoad mapping resource for selected forms, publish, and verify each one. Use options from get_business_process_flow_form_mapping_options.', object({
+    workflowId: bpfWorkflowId,
+    formIds: array(string('Eligible Main form GUID.'), 'Forms to map.', { minItems: 1, maxItems: 100 }),
+    behavior: { type: 'string', enum: ['enforce','prefer'], description: 'Selection behavior.' },
+    dirtyFormBehavior: { type: 'string', enum: ['block','save','relax-save','confirm-discard'], description: 'Unsaved-data behavior.' },
+    appIds: array(string('Optional model-driven app GUID.'), 'Limit mapping to selected apps.', { maxItems: 100 }),
+    notifications: boolean('Show actionable runtime notifications.'),
+    confirm: boolean('Confirm form and web-resource publication.')
+  }, ['workflowId', 'formIds', 'confirm']), { readOnly: false, timeoutMs: 120_000 }),
+  tool('remove_business_process_flow_form_mappings', 'removeBusinessProcessFlowFormMappings', 'Remove selected Quicker Portal-managed BPF form mappings, publish verified FormXML, and clean up generated resources when safe.', object({ workflowId: bpfWorkflowId, formIds: array(string('Mapped form GUID.'), 'Mappings to remove.', { minItems: 1, maxItems: 100 }), confirm }, ['workflowId', 'formIds', 'confirm']), { readOnly: false, destructive: true, timeoutMs: 120_000 }),
+  tool('rollback_business_process_flow', 'rollbackBusinessProcessFlow', 'Restore the environment-bound pre-edit BPF snapshot using a recent rollback token.', object({ rollbackToken: string('Rollback token returned by an update or patch.'), confirm }, ['rollbackToken', 'confirm']), { readOnly: false, destructive: true, timeoutMs: 120_000 }),
+  tool('delete_business_process_flow', 'deleteBusinessProcessFlow', 'Deactivate and permanently delete an unmanaged customizable BPF after dependency review and explicit approval.', object({ workflowId: bpfWorkflowId, confirm }, ['workflowId', 'confirm']), { readOnly: false, destructive: true, timeoutMs: 120_000 }),
+
   tool('list_canvas_apps', 'developerAssets', 'List Canvas apps available through Dataverse metadata.', object(), { fixedArguments: { kind: 'canvasApps' } }),
   tool('get_canvas_app', 'developerAssetDetail', 'Get Canvas app metadata and related component details.', object({ id: string('Canvas app GUID.') }, ['id']), { fixedArguments: { kind: 'canvasApps' } }),
   tool('get_canvas_authoring_status', 'canvasAuthoringStatus', 'Get Canvas prerequisites, connection, baseline, pending changes, and operations.', object({ ...canvasContext, appName: string('Optional display name.') }, ['appId'])),
@@ -695,7 +777,9 @@ export function publicTool(toolDefinition) {
     annotations: toolDefinition.annotations,
     securitySchemes,
     _meta: {
-      securitySchemes,
+      // securitySchemes is not repeated here. It is already a top-level field
+      // and nothing reads the copy, but serialising it twice cost 12 KB across
+      // the power-platform catalog - which every connected client downloads.
       'quickerportal/action': toolDefinition.action,
       'quickerportal/resource': toolDefinition.group,
       'quickerportal/risk': toolDefinition.risk,
