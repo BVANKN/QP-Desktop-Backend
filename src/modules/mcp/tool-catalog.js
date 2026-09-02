@@ -29,6 +29,7 @@ function tool(name, action, description, inputSchema = object(), options = {}) {
     risk: options.destructive ? 'destructive' : readOnly ? 'read' : 'write',
     fixedArguments: options.fixedArguments || undefined,
     argumentEnvelope: options.argumentEnvelope || undefined,
+    execution: options.execution || 'connected-desktop',
     timeoutMs: options.timeoutMs || 55_000
   });
 }
@@ -57,6 +58,45 @@ const anchoredTextEdit = object({
   expectedOccurrences: number('Exact number of anchors that must match before replacement.', { minimum: 1 })
 });
 const revision = string('Optional SHA-256 revision returned by the corresponding read tool. If supplied, a stale write is rejected.');
+const relationshipType = { type: 'string', enum: ['oneToMany', 'manyToMany'], description: 'oneToMany creates a lookup on the many-side table; manyToMany creates an intersect table.' };
+const cascadeBehavior = { type: 'string', enum: ['Cascade', 'Active', 'UserOwned', 'RemoveLink', 'Restrict', 'NoCascade'], description: 'Documented Dataverse relationship cascade behavior.' };
+const relationshipChanges = object({
+  cascadeConfiguration: object({ Assign: cascadeBehavior, Delete: cascadeBehavior, Merge: cascadeBehavior, Reparent: cascadeBehavior, Share: cascadeBehavior, Unshare: cascadeBehavior }),
+  associatedMenuLabel: string('New associated-menu label for a one-to-many relationship.'),
+  entity1MenuLabel: string('New first-side menu label for a many-to-many relationship.'),
+  entity2MenuLabel: string('New second-side menu label for a many-to-many relationship.'),
+  isHierarchical: boolean('Whether the one-to-many relationship is hierarchical.')
+});
+const sitemapPage = object({
+  id: string('Stable unique page ID.'),
+  title: string('Visible navigation label.'),
+  type: { type: 'string', enum: ['table', 'dashboard', 'webResource', 'url'], description: 'Navigation target type.' },
+  tableLogicalName: tableName,
+  dashboardId: string('System dashboard GUID.'),
+  webResourceName: string('Web resource name for a web-resource page.'),
+  url: string('Absolute HTTPS URL for an external page.'),
+  icon: string('Optional web-resource icon reference.'),
+  passParams: boolean('Pass organization and language parameters to the target.'),
+  languageCode: number('Label LCID, normally 1033.', { minimum: 1 })
+}, ['id', 'title', 'type']);
+const sitemapGroup = object({
+  id: string('Stable unique group ID.'),
+  title: string('Visible group label.'),
+  languageCode: number('Label LCID.', { minimum: 1 }),
+  pages: array(sitemapPage, 'Ordered pages in this group.', { minItems: 1, maxItems: 200 })
+}, ['id', 'title', 'pages']);
+const sitemapArea = object({
+  id: string('Stable unique area ID.'),
+  title: string('Visible area label.'),
+  icon: string('Optional web-resource icon reference.'),
+  languageCode: number('Label LCID.', { minimum: 1 }),
+  groups: array(sitemapGroup, 'Ordered groups in this area.', { minItems: 1, maxItems: 50 })
+}, ['id', 'title', 'groups']);
+const privilegeDepth = { type: 'string', enum: ['none', 'user', 'businessUnit', 'parentChild', 'organization'], description: 'Dataverse access depth for this table privilege.' };
+const rolePermissionDepths = object({
+  create: privilegeDepth, read: privilegeDepth, write: privilegeDepth, delete: privilegeDepth,
+  append: privilegeDepth, appendTo: privilegeDepth, assign: privilegeDepth, share: privilegeDepth
+});
 const sharePointOptions = { group: 'sharepoint' };
 const sharePointWriteOptions = { group: 'sharepoint', readOnly: false };
 const sharePointDestructiveOptions = { group: 'sharepoint', readOnly: false, destructive: true };
@@ -204,6 +244,7 @@ const commandPreviewMutation = {
 };
 
 export const MCP_TOOLS = Object.freeze([
+  tool('get_power_platform_connection', 'mcpConnectionStatus', 'Check whether the account-scoped MCP endpoint has a live Quicker Portal desktop, which tenant/environment it targets, and how to reconnect it. Call this before a multi-step project build.', object(), { execution: 'server' }),
   tool('environment_overview', 'environmentInsights', 'Summarize tables, flows, solutions, applications, security, and governance signals in the connected environment.'),
   tool('list_tables', 'tables', 'List Dataverse table metadata in the connected environment.', object({ force: boolean('Bypass the desktop metadata cache.') })),
   tool('get_table', 'tableDetail', 'Get detailed metadata for one Dataverse table.', object({ logicalName: tableName }, ['logicalName'])),
@@ -214,16 +255,32 @@ export const MCP_TOOLS = Object.freeze([
   tool('get_er_model', 'erDiagramMetadata', 'Get environment-wide Dataverse relationship metadata for ER analysis.'),
   tool('get_component_dependencies', 'componentRelated', 'Get dependencies and related components for a Power Platform component.', object({ componentType: number('Dataverse solution component type.'), objectId: string('Component GUID.') }, ['componentType', 'objectId'])),
 
+  tool('get_relationship', 'tableRelationshipDetail', 'Read the current complete relationship metadata and verify that a one-to-many lookup column actually materialized.', object({ id: string('Relationship metadata GUID.'), schemaName: string('Relationship schema name.') })),
+  tool('check_relationship_eligibility', 'tableRelationshipEligibility', 'Ask Dataverse whether both tables can participate in the requested relationship before attempting creation.', object({ type: relationshipType, referencedEntity: tableName, referencingEntity: tableName, entity1LogicalName: tableName, entity2LogicalName: tableName }, ['type'])),
+  tool('create_relationship', 'createTableRelationship', 'Create and verify a one-to-many relationship plus its lookup column, or a many-to-many relationship. The operation preflights eligibility, publishes, and re-reads canonical metadata before reporting success.', object({
+    type: relationshipType, schemaName: string('Relationship schema name.'), referencedEntity: tableName, referencingEntity: tableName,
+    lookupSchemaName: string('Lookup column schema name for one-to-many.'), lookupDisplayName: string('Lookup display name.'),
+    requiredLevel: { type: 'string', enum: ['None', 'Recommended', 'ApplicationRequired'], description: 'Lookup requirement level.' },
+    entity1LogicalName: tableName, entity2LogicalName: tableName, intersectEntityName: string('Optional intersect table schema name.'),
+    description: string('Lookup description.'), solutionUniqueName: string('Optional unmanaged solution unique name.'), publish: boolean('Publish and verify after creation; defaults to true.')
+  }, ['type', 'schemaName']), { readOnly: false, timeoutMs: 90_000 }),
+  tool('update_relationship', 'updateTableRelationship', 'Update supported relationship cascade, menu-label, or hierarchy settings using the complete current metadata document, then publish and re-read it.', object({ id: string('Relationship metadata GUID.'), schemaName: string('Relationship schema name.'), changes: relationshipChanges, publish: boolean('Publish after update; defaults to true.') }, ['changes']), { readOnly: false, idempotent: true }),
+  tool('delete_relationship', 'deleteTableRelationship', 'Delete an unmanaged customizable relationship after explicit approval.', object({ id: string('Relationship metadata GUID.'), schemaName: string('Relationship schema name.'), confirm }, ['confirm']), { readOnly: false, destructive: true }),
+
   tool('list_forms', 'developerAssets', 'List model-driven system forms, optionally filtered to one table.', object({ tableLogicalName: tableName }), { fixedArguments: { kind: 'forms' } }),
   tool('get_form', 'developerAssetDetail', 'Get a form including its FormXML, ownership, managed state, and dependencies.', object({ id: string('System form GUID.') }, ['id']), { fixedArguments: { kind: 'forms' } }),
+  tool('create_form', 'createComponentDesigner', 'Create, publish, and re-read a new system form from validated FormXML.', object({ tableLogicalName: tableName, name: string('Form name.'), description: string('Optional description.'), formXml: string('Complete FormXML with a form root element.'), formType: number('Dataverse system form type; main is normally 2.'), active: boolean('Create active; defaults to true.'), solutionUniqueName: string('Optional unmanaged solution unique name.'), publish: boolean('Publish after creation; defaults to true.') }, ['tableLogicalName', 'name', 'formXml']), { readOnly: false, fixedArguments: { kind: 'forms' }, timeoutMs: 90_000 }),
   tool('patch_form', 'patchComponentDesigner', 'Preferred form editor: read the latest FormXML on the desktop, apply exact anchored edits, validate it, and conditionally save it with rollback. Do not ask the user to provide complete FormXML.', object({ id: string('System form GUID.'), edits: array(anchoredTextEdit, 'Ordered edits against the current FormXML.', { minItems: 1, maxItems: 128 }), expectedRevision: revision, name: string('Optional form name.'), description: string('Optional description.'), publish: boolean('Publish the owning table after save.') }, ['id', 'edits']), { readOnly: false, idempotent: true, fixedArguments: { kind: 'forms' } }),
   tool('update_form', 'saveComponentDesigner', 'Complete FormXML replacement for import/recovery scenarios. Prefer patch_form for normal changes so current content is preserved.', object({ id: string('System form GUID.'), formXml: string('Complete FormXML with a form root element.'), name: string('Optional form name.'), description: string('Optional description.'), publish: boolean('Publish the owning table after save.') }, ['id', 'formXml']), { readOnly: false, idempotent: true, fixedArguments: { kind: 'forms' } }),
   tool('publish_form', 'publishComponentDesigner', 'Publish the table customizations containing a system form.', object({ id: string('System form GUID.'), target: tableName, confirm: boolean('Confirm publishing this form.') }, ['id', 'confirm']), { readOnly: false, idempotent: true, fixedArguments: { kind: 'forms' } }),
+  tool('delete_form', 'deleteComponentDesigner', 'Delete an unmanaged customizable system form and publish its table after explicit approval.', object({ id: string('System form GUID.'), publish: boolean('Publish after deletion; defaults to true.'), confirm }, ['id', 'confirm']), { readOnly: false, destructive: true, fixedArguments: { kind: 'forms' } }),
   tool('list_views', 'developerAssets', 'List system views, optionally filtered to one table.', object({ tableLogicalName: tableName }), { fixedArguments: { kind: 'views' } }),
   tool('get_view', 'developerAssetDetail', 'Get a system view including FetchXML and LayoutXML.', object({ id: string('Saved query GUID.') }, ['id']), { fixedArguments: { kind: 'views' } }),
+  tool('create_view', 'createComponentDesigner', 'Create, publish, and re-read a new system view from validated FetchXML and LayoutXML.', object({ tableLogicalName: tableName, name: string('View name.'), description: string('Optional description.'), fetchXml: string('Complete FetchXML query.'), layoutXml: string('Complete grid LayoutXML.'), queryType: number('Saved-query type; defaults to 0.'), solutionUniqueName: string('Optional unmanaged solution unique name.'), publish: boolean('Publish after creation; defaults to true.') }, ['tableLogicalName', 'name', 'fetchXml', 'layoutXml']), { readOnly: false, fixedArguments: { kind: 'views' }, timeoutMs: 90_000 }),
   tool('patch_view', 'patchComponentDesigner', 'Preferred view editor: read the latest FetchXML/LayoutXML on the desktop, apply targeted exact edits, validate both documents, and conditionally save with rollback. Supply at least one edit array; never reconstruct unchanged XML.', object({ id: string('Saved query GUID.'), fetchXmlEdits: array(anchoredTextEdit, 'Ordered edits against current FetchXML.', { minItems: 1, maxItems: 128 }), layoutXmlEdits: array(anchoredTextEdit, 'Ordered edits against current LayoutXML.', { minItems: 1, maxItems: 128 }), expectedRevision: revision, name: string('Optional view name.'), description: string('Optional description.'), publish: boolean('Publish the owning table after save.') }, ['id']), { readOnly: false, idempotent: true, fixedArguments: { kind: 'views' } }),
   tool('update_view', 'saveComponentDesigner', 'Complete FetchXML and LayoutXML replacement for import/recovery scenarios. Prefer patch_view for normal changes.', object({ id: string('Saved query GUID.'), fetchXml: string('Complete FetchXML query.'), layoutXml: string('Complete view grid LayoutXML.'), name: string('Optional view name.'), description: string('Optional description.'), publish: boolean('Publish the owning table after save.') }, ['id', 'fetchXml', 'layoutXml']), { readOnly: false, idempotent: true, fixedArguments: { kind: 'views' } }),
   tool('publish_view', 'publishComponentDesigner', 'Publish the table customizations containing a system view.', object({ id: string('Saved query GUID.'), target: tableName, confirm: boolean('Confirm publishing this view.') }, ['id', 'confirm']), { readOnly: false, idempotent: true, fixedArguments: { kind: 'views' } }),
+  tool('delete_view', 'deleteComponentDesigner', 'Delete an unmanaged customizable system view and publish its table after explicit approval.', object({ id: string('Saved query GUID.'), publish: boolean('Publish after deletion; defaults to true.'), confirm }, ['id', 'confirm']), { readOnly: false, destructive: true, fixedArguments: { kind: 'views' } }),
   tool('list_canvas_apps', 'developerAssets', 'List Canvas apps available through Dataverse metadata.', object(), { fixedArguments: { kind: 'canvasApps' } }),
   tool('get_canvas_app', 'developerAssetDetail', 'Get Canvas app metadata and related component details.', object({ id: string('Canvas app GUID.') }, ['id']), { fixedArguments: { kind: 'canvasApps' } }),
   tool('get_canvas_authoring_status', 'canvasAuthoringStatus', 'Get Canvas prerequisites, connection, baseline, pending changes, and operations.', object({ ...canvasContext, appName: string('Optional display name.') }, ['appId'])),
@@ -263,11 +320,11 @@ export const MCP_TOOLS = Object.freeze([
   tool('update_record', 'mcpUpdateRecord', 'Update selected values on one Dataverse row.', object({ tableLogicalName: tableName, recordId, values: arbitraryPayload }, ['tableLogicalName', 'recordId', 'values']), { readOnly: false, idempotent: true }),
   tool('delete_record', 'mcpDeleteRecord', 'Permanently delete one Dataverse row after explicit approval.', object({ tableLogicalName: tableName, recordId, confirm }, ['tableLogicalName', 'recordId', 'confirm']), { readOnly: false, destructive: true }),
 
-  tool('create_table', 'createTable', 'Create a custom Dataverse table from the supplied table definition.', object({ definition: arbitraryPayload }, ['definition']), { readOnly: false }),
-  tool('update_table', 'updateTable', 'Update supported metadata for a custom Dataverse table.', object({ logicalName: tableName, changes: arbitraryPayload }, ['logicalName', 'changes']), { readOnly: false, idempotent: true }),
+  tool('create_table', 'createTable', 'Create a custom Dataverse table from the supplied table definition.', object({ definition: arbitraryPayload }, ['definition']), { readOnly: false, argumentEnvelope: 'definition' }),
+  tool('update_table', 'updateTable', 'Update supported metadata for a custom Dataverse table.', object({ logicalName: tableName, changes: arbitraryPayload }, ['logicalName', 'changes']), { readOnly: false, idempotent: true, argumentEnvelope: 'changes' }),
   tool('delete_table', 'deleteTable', 'Delete a custom Dataverse table after explicit approval.', object({ logicalName: tableName, confirm }, ['logicalName', 'confirm']), { readOnly: false, destructive: true }),
-  tool('create_column', 'createColumn', 'Create a Dataverse column on a custom table.', object({ tableLogicalName: tableName, definition: arbitraryPayload }, ['tableLogicalName', 'definition']), { readOnly: false }),
-  tool('update_column', 'updateColumn', 'Update supported metadata for a Dataverse column.', object({ tableLogicalName: tableName, columnLogicalName: columnName, changes: arbitraryPayload }, ['tableLogicalName', 'columnLogicalName', 'changes']), { readOnly: false, idempotent: true }),
+  tool('create_column', 'createColumn', 'Create a Dataverse scalar or choice column. Use create_relationship for lookup columns so the relationship and lookup are verified together.', object({ tableLogicalName: tableName, definition: arbitraryPayload }, ['tableLogicalName', 'definition']), { readOnly: false, argumentEnvelope: 'definition' }),
+  tool('update_column', 'updateColumn', 'Update supported metadata for a Dataverse column.', object({ tableLogicalName: tableName, columnLogicalName: columnName, changes: arbitraryPayload }, ['tableLogicalName', 'columnLogicalName', 'changes']), { readOnly: false, idempotent: true, argumentEnvelope: 'changes' }),
   tool('delete_column', 'deleteColumn', 'Delete a custom Dataverse column after explicit approval.', object({ tableLogicalName: tableName, columnLogicalName: columnName, confirm }, ['tableLogicalName', 'columnLogicalName', 'confirm']), { readOnly: false, destructive: true }),
   tool('publish_customizations', 'publishAll', 'Publish all pending Dataverse customizations.', object({ confirm: boolean('Confirm publishing changes for the connected environment.') }, ['confirm']), { readOnly: false, idempotent: true, timeoutMs: 90_000 }),
 
@@ -288,7 +345,7 @@ export const MCP_TOOLS = Object.freeze([
   tool('list_model_apps', 'mdaApps', 'List model-driven applications in the environment.'),
   tool('get_model_app', 'mdaAppDetail', 'Get model-driven app metadata, navigation components, access, and branding.', object({ appModuleId: string('App module GUID.') }, ['appModuleId'])),
   tool('create_model_app', 'createMdaApp', 'Create a model-driven app shell.', object({ name: string('App display name.'), uniqueName: string('App unique name.'), description: string('App description.') }, ['name', 'uniqueName']), { readOnly: false }),
-  tool('update_model_app', 'updateMdaApp', 'Update editable model-driven app metadata.', object({ appModuleId: string('App module GUID.'), changes: arbitraryPayload }, ['appModuleId', 'changes']), { readOnly: false, idempotent: true }),
+  tool('update_model_app', 'updateMdaApp', 'Update editable model-driven app metadata.', object({ appModuleId: string('App module GUID.'), changes: arbitraryPayload }, ['appModuleId', 'changes']), { readOnly: false, idempotent: true, argumentEnvelope: 'changes' }),
   tool('publish_model_app', 'publishMdaApp', 'Publish a model-driven app.', object({ appModuleId: string('App module GUID.'), confirm: boolean('Confirm publishing this application.') }, ['appModuleId', 'confirm']), { readOnly: false, idempotent: true, timeoutMs: 90_000 }),
   tool('open_model_app', 'openMdaApp', 'Open a model-driven app in the restricted Quicker Portal browser on the connected desktop.', object({ appModuleId: string('App module GUID.'), appUrl: string('Optional known app URL.') }, ['appModuleId']), { readOnly: false }),
 
