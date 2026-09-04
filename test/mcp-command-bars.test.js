@@ -67,7 +67,11 @@ test('tool discovery metadata remains within its regression budget', () => {
     // tools intentionally span two discovery pages; no client receives the
     // aggregate in one response. Keep a bounded total as a regression signal,
     // then independently enforce the actual 20-tool / 48 KiB wire-page limit.
-    const aggregateBudget = group === 'power-platform' ? 108 * 1024 : 40 * 1024;
+    // The aggregate catalog is never sent as one response; it is paged below.
+    // Keep a generous total-growth alarm while the 48 KiB page limit remains
+    // the actual transport invariant. Dataverse authoring now includes complete
+    // app-source, relationship, component, and privilege lifecycles.
+    const aggregateBudget = group === 'power-platform' ? 240 * 1024 : 40 * 1024;
     const averageBudget = group === 'power-platform' ? 1_200 : 1_400;
     assert.ok(totalBytes < aggregateBudget, `${group} MCP catalog regressed to ${totalBytes} bytes.`);
     assert.ok(totalBytes / advertised.length < averageBudget, `${group} average MCP descriptor regressed to ${Math.ceil(totalBytes / advertised.length)} bytes.`);

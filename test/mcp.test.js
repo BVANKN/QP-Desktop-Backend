@@ -506,3 +506,57 @@ test('tool calls traverse the desktop broker and become environment-scoped analy
   assert.equal(detail.body.analytics.transmissions[0].request.tableLogicalName, 'account');
   assert.equal(detail.body.analytics.transmissions[0].response.value[0].name, 'Acme');
 });
+
+// Revoking and deleting are two decisions, not one with a flag. Revoke keeps a
+// visible record; delete is the separate choice to stop keeping it. Neither
+// touches the transmission history, which lives elsewhere.
+test('a connection can be revoked, then deleted, and delete is a separate endpoint', async () => {
+  const session = await registerUser('mcpdelete', 'pro');
+  const created = await createConnection(session);
+  const id = created.connection.id;
+
+  const revoked = await server.call('DELETE', `/api/mcp/connections/${id}`, null, { accessToken: session.accessToken });
+  assert.equal(revoked.status, 200, JSON.stringify(revoked.body));
+  assert.equal(revoked.body.connection.enabled, false);
+
+  // Still listed after a revoke: that is the record the revoke preserves.
+  const afterRevoke = await server.call('GET', '/api/mcp/connections', undefined, { accessToken: session.accessToken });
+  assert.equal(afterRevoke.status, 200);
+  assert.ok(afterRevoke.body.connections.some(item => item.id === id), 'a revoked connection stays listed');
+
+  const deleted = await server.call('DELETE', `/api/mcp/connections/${id}/permanent`, null, { accessToken: session.accessToken });
+  assert.equal(deleted.status, 200, JSON.stringify(deleted.body));
+  assert.equal(deleted.body.deleted, true);
+
+  const afterDelete = await server.call('GET', '/api/mcp/connections', undefined, { accessToken: session.accessToken });
+  assert.ok(!afterDelete.body.connections.some(item => item.id === id), 'a deleted connection is gone from the list');
+
+  // Deleting twice is a clear 404, not a silent success.
+  const again = await server.call('DELETE', `/api/mcp/connections/${id}/permanent`, null, { accessToken: session.accessToken });
+  assert.equal(again.status, 404, JSON.stringify(again.body));
+});
+
+test('an active connection can be deleted outright, and one user cannot delete another\'s', async () => {
+  const owner = await registerUser('mcpdeleteowner', 'pro');
+  const stranger = await registerUser('mcpdeletestranger', 'pro');
+  const created = await createConnection(owner);
+  const id = created.connection.id;
+
+  const foreign = await server.call('DELETE', `/api/mcp/connections/${id}/permanent`, null, { accessToken: stranger.accessToken });
+  assert.equal(foreign.status, 404, 'a connection must not be deletable by anyone but its owner');
+
+  const deleted = await server.call('DELETE', `/api/mcp/connections/${id}/permanent`, null, { accessToken: owner.accessToken });
+  assert.equal(deleted.status, 200, JSON.stringify(deleted.body));
+
+  // The key stops working at the same moment, which is what makes deleting an
+  // active connection safe to offer.
+  const call = await mcpCall(owner, created, 'tools/list');
+  assert.ok(call.status >= 400, `a deleted connection's key must stop working, got ${call.status}`);
+});
+
+test('free users cannot delete MCP connections either', async () => {
+  const session = await registerUser('mcpdeletefree', 'free');
+  const result = await server.call('DELETE', '/api/mcp/connections/anything/permanent', null, { accessToken: session.accessToken });
+  assert.equal(result.status, 403);
+  assert.equal(result.body.code, 'MCP_PLAN_REQUIRED');
+});

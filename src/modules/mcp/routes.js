@@ -9,6 +9,7 @@ import {
   mcpConnectionEndpoint,
   mcpResourceMetadata,
   powerPagesMcpConnectionEndpoint,
+  deleteMcpConnection,
   revokeMcpConnection,
   sharePointMcpConnectionEndpoint
 } from './connections.js';
@@ -287,6 +288,13 @@ export function registerMcpRoutes(router) {
   router.delete('/api/mcp/connections/:connectionId', authenticate, requireMcpEntitlement, async ctx => {
     const connection = await revokeMcpConnection(ctx.auth.sub, ctx.params.connectionId);
     sendJson(ctx, 200, { ok: true, connection });
+  });
+  // Separate from the revoke route on purpose. Removing the record is not a
+  // stronger revoke, it is a different decision, and it should not be
+  // reachable by varying a flag on the same request.
+  router.delete('/api/mcp/connections/:connectionId/permanent', authenticate, requireMcpEntitlement, async ctx => {
+    const deleted = await deleteMcpConnection(ctx.auth.sub, ctx.params.connectionId);
+    sendJson(ctx, 200, { ok: true, ...deleted });
   });
   router.get('/api/mcp/analytics', authenticate, requireMcpEntitlement, async ctx => {
     const analytics = await queryTransmissionAnalytics(ctx.auth.sub, {

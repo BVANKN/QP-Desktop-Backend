@@ -4,10 +4,10 @@ import test from 'node:test';
 import { MCP_TOOL_BY_NAME, publicTool } from '../src/modules/mcp/tool-catalog.js';
 
 const expected = {
-  patch_cloud_flow: { action: 'patchFlowDefinition', required: ['workflowId', 'operations'] },
-  patch_form: { action: 'patchComponentDesigner', required: ['id', 'edits'] },
-  patch_view: { action: 'patchComponentDesigner', required: ['id'] },
-  patch_web_resource: { action: 'patchWebResource', required: ['webResourceId', 'edits'] }
+  patch_cloud_flow: { action: 'patchFlowDefinition', required: ['workflowId', 'operations', 'expectedRevision'] },
+  patch_form: { action: 'patchComponentDesigner', required: ['id', 'edits', 'expectedRevision'] },
+  patch_view: { action: 'patchComponentDesigner', required: ['id', 'expectedRevision'] },
+  patch_web_resource: { action: 'patchWebResource', required: ['webResourceId', 'edits', 'expectedRevision'] }
 };
 
 test('MCP publishes targeted artifact mutation tools with write semantics', () => {

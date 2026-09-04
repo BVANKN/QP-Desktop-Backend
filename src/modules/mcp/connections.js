@@ -333,6 +333,50 @@ export async function revokeMcpConnection(userId, connectionId) {
   return updated;
 }
 
+/**
+ * Removes a connection record outright, rather than leaving a revoked row in
+ * the list for the 90-day retention window.
+ *
+ * Revoking is the safe default and stays that way: it keeps a visible record
+ * that the connection existed and when its access ended. Deleting is for
+ * tidying the list afterwards, so it is a separate, explicit call.
+ *
+ * The auto-provisioned resources (IDE, SharePoint, Power Pages) are singletons
+ * the product recreates on demand, so deleting one would only produce a
+ * confusing gap. They are refused here as well as being absent from the list.
+ *
+ * Transmission analytics are stored separately and are untouched: deleting a
+ * connection never erases the record of what it did.
+ */
+export async function deleteMcpConnection(userId, connectionId) {
+  const id = cleanIdentifier(connectionId, 'MCP connection ID');
+  if (mongoEnabled()) {
+    const collection = await mongoCollection('mcp_connections');
+    const existing = await collection.findOne({ id, userId });
+    if (!existing) throw new NotFoundError('MCP connection not found.');
+    assertDeletableConnection(existing);
+    await collection.deleteOne({ id, userId });
+    return { deleted: true, id, name: existing.name || '' };
+  }
+  let result;
+  await store.update(document => {
+    const connection = document.connections.find(item => item.id === id && item.userId === userId);
+    if (!connection) throw new NotFoundError('MCP connection not found.');
+    assertDeletableConnection(connection);
+    document.connections = document.connections.filter(item => !(item.id === id && item.userId === userId));
+    result = { deleted: true, id, name: connection.name || '' };
+    return { result };
+  });
+  return result;
+}
+
+function assertDeletableConnection(connection) {
+  const kind = connection.kind || 'power-platform';
+  if (['ide', 'sharepoint', 'powerpages'].includes(kind)) {
+    throw new ValidationError(`The ${kind} connection is provisioned automatically and cannot be deleted. Revoke it instead.`, { field: 'connectionId' });
+  }
+}
+
 export async function authenticateMcpConnection({ userId, tenantId, authorization }) {
   const token = String(authorization || '').startsWith('Bearer ')
     ? String(authorization).slice(7).trim()

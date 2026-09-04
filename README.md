@@ -144,6 +144,7 @@ continues to apply field-name redaction.
 | GET | `/api/mcp/tools` | QP Bearer + Pro | Governed Power Platform tool catalog |
 | GET/POST | `/api/mcp/connections` | QP Bearer + Pro | List/create tenant-scoped MCP connections |
 | DELETE | `/api/mcp/connections/:id` | QP Bearer + Pro | Revoke a connection key |
+| DELETE | `/api/mcp/connections/:id/permanent` | QP Bearer + Pro | Delete the connection record outright. Revoke stops access and keeps the record; this is the separate decision to stop keeping it. Transmission history is unaffected. |
 | GET | `/api/mcp/analytics` | QP Bearer + Pro | Stream-aggregate MCP transmission analytics |
 | GET | `/.well-known/oauth-protected-resource/mcp/:userId/:tenantId` | — | RFC 9728 protected-resource discovery |
 | GET | `/.well-known/oauth-authorization-server` | — | RFC 8414 authorization-server discovery |
