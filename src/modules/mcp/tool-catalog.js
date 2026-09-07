@@ -477,6 +477,17 @@ export const MCP_TOOLS = Object.freeze([
   tool('patch_cloud_flow', 'patchFlowDefinition', 'Preferred flow editor: the desktop reads current clientdata, applies targeted JSON operations, validates the flow, conditionally saves it, and re-reads the persisted definition. Never ask the user to paste or return the complete workflow JSON.', object({ workflowId: string('Cloud flow workflow GUID.'), operations: array(jsonPatchOperation, 'Ordered targeted operations against clientdata returned by get_cloud_flow.', { minItems: 1, maxItems: 128 }), expectedRevision: revision, name: string('Optional new display name.'), description: string('Optional new description.') }, ['workflowId', 'operations', 'expectedRevision']), { readOnly: false, idempotent: true, timeoutMs: 90_000 }),
   tool('update_cloud_flow', 'updateFlow', 'Update flow metadata or completely replace its definition for import/recovery. Prefer patch_cloud_flow for existing-flow logic changes; complete workflow JSON is not required for targeted edits.', object({ workflowId: string('Cloud flow workflow GUID.'), definition: arbitraryPayload, connectionReferences: arbitraryPayload, name: string('Optional new display name.'), description: string('Optional new description.') }, ['workflowId']), { readOnly: false, idempotent: true, timeoutMs: 90_000 }),
   tool('set_cloud_flow_state', 'setFlowState', 'Enable or disable a cloud flow.', object({ workflowId: string('Cloud flow workflow GUID.'), enabled: boolean('True to enable, false to disable.'), confirm: boolean('Confirm changing the live flow state.') }, ['workflowId', 'enabled', 'confirm']), { readOnly: false, idempotent: true }),
+  // Run history. Diagnosing a failure was the one thing an agent could not do
+  // here: it could read and rewrite a flow, but not see that the flow had been
+  // failing every night for a week, or why.
+  tool('list_flow_runs', 'listFlowRuns', 'List cloud flow run history from Dataverse with status, timing, trigger and error, plus failures already grouped by distinct cause. Use this to answer why a flow is failing before reading its definition.', object({
+    workflowId: string('Optional cloud flow workflow GUID. Omit to read every flow in the environment.'),
+    status: { type: 'string', enum: ['all', 'failed', 'Succeeded', 'Running', 'Cancelled'], description: 'Filter by outcome. "failed" covers every terminal failure status.' },
+    days: number('How far back to look, in days. Defaults to 7, maximum 90.', { minimum: 1, maximum: 90 }),
+    top: number('Maximum runs to return. Defaults to 200, maximum 2000.', { minimum: 1, maximum: 2000 })
+  }), { timeoutMs: 90_000 }),
+  tool('get_flow_run', 'getFlowRun', 'Read one cloud flow run: status, timing, trigger, correlation id, and its parsed error code and message.', object({ flowRunId: string('Flow run GUID from list_flow_runs.') }, ['flowRunId'])),
+
   tool('delete_cloud_flow', 'deleteFlow', 'Delete an unmanaged cloud flow after explicit approval.', object({ workflowId: string('Cloud flow workflow GUID.'), confirm }, ['workflowId', 'confirm']), { readOnly: false, destructive: true }),
 
   tool('list_solutions', 'solutions', 'List Power Platform solutions and their layer metadata.'),
