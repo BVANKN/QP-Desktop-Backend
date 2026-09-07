@@ -10,12 +10,14 @@ import {
   mcpResourceMetadata,
   powerPagesMcpConnectionEndpoint,
   deleteMcpConnection,
+  setMcpConnectionToolPolicy,
   revokeMcpConnection,
   sharePointMcpConnectionEndpoint
 } from './connections.js';
 import { claimDesktopJobs, completeDesktopJob, desktopStatus, heartbeatDesktop } from './broker.js';
 import { waitForSignal } from './signals.js';
 import { queryTransmissionAnalytics } from './analytics.js';
+import { CEILINGS, DEFAULT_POLICY, SUBJECTS, summarizePolicy } from './tool-policy.js';
 import { MCP_TOOLS } from './tool-catalog.js';
 import { handleMcpRequest } from './protocol.js';
 import { entitlementsForUser } from '../plans/subscription-store.js';
@@ -293,6 +295,21 @@ export function registerMcpRoutes(router) {
   // Separate from the revoke route on purpose. Removing the record is not a
   // stronger revoke, it is a different decision, and it should not be
   // reachable by varying a flag on the same request.
+  // What a connection may reach, and what that choice actually permits. The
+  // catalog is returned with it so the desktop never has to keep its own copy
+  // of the classification in step with the server's.
+  router.get('/api/mcp/tool-policy/catalog', authenticate, requireMcpEntitlement, ctx => {
+    sendJson(ctx, 200, { ok: true, subjects: SUBJECTS, ceilings: CEILINGS, defaultPolicy: DEFAULT_POLICY, totalTools: MCP_TOOLS.length });
+  });
+  router.put('/api/mcp/connections/:connectionId/tool-policy', authenticate, requireMcpEntitlement, async ctx => {
+    const body = await readJsonBody(ctx);
+    const connection = await setMcpConnectionToolPolicy(ctx.auth.sub, ctx.params.connectionId, body?.policy ?? body);
+    sendJson(ctx, 200, { ok: true, connection, summary: summarizePolicy(MCP_TOOLS, connection.toolPolicy) });
+  });
+  router.post('/api/mcp/tool-policy/preview', authenticate, requireMcpEntitlement, async ctx => {
+    const body = await readJsonBody(ctx);
+    sendJson(ctx, 200, { ok: true, summary: summarizePolicy(MCP_TOOLS, body?.policy ?? body) });
+  });
   router.delete('/api/mcp/connections/:connectionId/permanent', authenticate, requireMcpEntitlement, async ctx => {
     const deleted = await deleteMcpConnection(ctx.auth.sub, ctx.params.connectionId);
     sendJson(ctx, 200, { ok: true, ...deleted });

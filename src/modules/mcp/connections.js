@@ -2,6 +2,7 @@ import { JsonStore } from '../../lib/json-store.js';
 import { randomId, randomToken, safeEqual, sha256Hex } from '../../lib/crypto.js';
 import { mongoCollection, mongoEnabled } from '../../lib/mongo.js';
 import { AuthenticationError, NotFoundError, ValidationError } from '../../core/errors.js';
+import { normalizePolicy } from './tool-policy.js';
 
 const store = new JsonStore('mcp/connections.json', { version: 1, connections: [] });
 const MAX_ACTIVE_CONNECTIONS_PER_USER = 20;
@@ -28,6 +29,9 @@ function publicConnection(connection) {
     captureMode: connection.captureMode,
     enabled: connection.enabled,
     keyPrefix: connection.keyPrefix,
+    // What this connection may reach. Absent on older records, which is why it
+    // is normalized rather than read straight through.
+    toolPolicy: normalizePolicy(connection.toolPolicy),
     createdAt: connection.createdAt,
     lastUsedAt: connection.lastUsedAt || null,
     revokedAt: connection.revokedAt || null
@@ -375,6 +379,37 @@ function assertDeletableConnection(connection) {
   if (['ide', 'sharepoint', 'powerpages'].includes(kind)) {
     throw new ValidationError(`The ${kind} connection is provisioned automatically and cannot be deleted. Revoke it instead.`, { field: 'connectionId' });
   }
+}
+
+/**
+ * Changes what one connection may reach.
+ *
+ * Stored on the connection rather than the account because the whole point is
+ * that two clients can differ: a coding assistant that may read schema and
+ * build views, and a support agent that may read records and nothing else,
+ * should not have to be the same.
+ */
+export async function setMcpConnectionToolPolicy(userId, connectionId, policy) {
+  const id = cleanIdentifier(connectionId, 'MCP connection ID');
+  const toolPolicy = normalizePolicy(policy);
+  if (mongoEnabled()) {
+    const updated = await (await mongoCollection('mcp_connections')).findOneAndUpdate(
+      { id, userId },
+      { $set: { toolPolicy } },
+      { returnDocument: 'after' }
+    );
+    if (!updated) throw new NotFoundError('MCP connection not found.');
+    return publicConnection(updated);
+  }
+  let result;
+  await store.update(document => {
+    const connection = document.connections.find(item => item.id === id && item.userId === userId);
+    if (!connection) throw new NotFoundError('MCP connection not found.');
+    connection.toolPolicy = toolPolicy;
+    result = publicConnection(connection);
+    return { result };
+  });
+  return result;
 }
 
 export async function authenticateMcpConnection({ userId, tenantId, authorization }) {

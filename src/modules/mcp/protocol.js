@@ -4,6 +4,7 @@ import { readJsonBody } from '../../core/http/context.js';
 import { authenticateMcpConnection } from './connections.js';
 import { authenticateMcpOAuthToken } from './oauth.js';
 import { MCP_TOOLS, MCP_TOOL_BY_NAME, publicTool } from './tool-catalog.js';
+import { toolAllowed } from './tool-policy.js';
 import { currentDesktopEnvironment, desktopStatus, enqueueDesktopToolCall, waitForDesktopJob, getDesktopOperation } from './broker.js';
 import { recordTransmission } from './analytics.js';
 import { entitlementsForUser } from '../plans/subscription-store.js';
@@ -282,7 +283,12 @@ export async function handleMcpRequest(ctx, { scopedToolName, resourceKind = 'po
     return sendMcpJson(ctx, 400, jsonRpcError(body?.id, -32600, 'Invalid JSON-RPC request.'));
   }
   const isNotification = body.id === undefined || body.id === null;
-  const resourceTools = MCP_TOOLS.filter(tool => tool.group === resourceKind);
+  // The connection's own policy decides which tools exist for it. Filtering the
+  // advertised list as well as the call is deliberate: a model that cannot see
+  // a tool does not plan around it, propose it, or ask the user to enable
+  // something mid-task. Refusing at call time alone would leave it doing all
+  // three.
+  const resourceTools = MCP_TOOLS.filter(tool => tool.group === resourceKind && toolAllowed(tool, connection.toolPolicy).allowed);
   const isSharePoint = resourceKind === 'sharepoint';
   const isPowerPages = resourceKind === 'powerpages';
 
@@ -355,6 +361,17 @@ export async function handleMcpRequest(ctx, { scopedToolName, resourceKind = 'po
     if (scopedToolName && requestedName !== scopedToolName) return sendMcpJson(ctx, 200, jsonRpcError(body.id, -32602, `This endpoint only exposes ${scopedToolName}.`));
     const tool = MCP_TOOL_BY_NAME.get(requestedName);
     if (!tool || tool.group !== resourceKind) return sendMcpJson(ctx, 200, jsonRpcError(body.id, -32602, `Unknown tool: ${requestedName}.`));
+    // Enforced here too, not only in the advertised list: a client may have
+    // cached an older list, or simply guessed a name.
+    const permitted = toolAllowed(tool, connection.toolPolicy);
+    if (!permitted.allowed) {
+      return sendMcpJson(ctx, 200, jsonRpcError(body.id, -32003, `${requestedName} is not available on this MCP connection. ${permitted.detail}`, {
+        code: 'MCP_TOOL_NOT_PERMITTED',
+        subject: permitted.subject,
+        reason: permitted.reason,
+        remediation: 'Change what this connection may reach in Quicker Portal, under the MCP connection\'s access settings.'
+      }));
+    }
     const requiredScope = tool.annotations.readOnlyHint ? 'mcp:read' : 'mcp:write';
     if (!hasScope(connection, requiredScope)) {
       return sendMcpJson(ctx, 403, jsonRpcError(body.id, -32003, `The access token needs ${requiredScope} scope.`), {
