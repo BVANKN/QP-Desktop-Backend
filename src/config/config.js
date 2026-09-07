@@ -98,7 +98,10 @@ export const config = Object.freeze({
       codeTtlSeconds: intEnv('QP_MCP_OAUTH_CODE_TTL_SECONDS', 5 * 60),
       accessTtlSeconds: intEnv('QP_MCP_OAUTH_ACCESS_TTL_SECONDS', 15 * 60),
       refreshTtlSeconds: intEnv('QP_MCP_OAUTH_REFRESH_TTL_SECONDS', 30 * 24 * 60 * 60),
-      refreshRetryGraceSeconds: intEnv('QP_MCP_OAUTH_REFRESH_RETRY_GRACE_SECONDS', 10),
+      // Ten seconds assumed a retry follows immediately. A client that timed
+      // out mid-request and retried was routinely outside it, and being outside
+      // it revoked the grant.
+      refreshRetryGraceSeconds: intEnv('QP_MCP_OAUTH_REFRESH_RETRY_GRACE_SECONDS', 90),
       maxClients: intEnv('QP_MCP_OAUTH_MAX_CLIENTS', 1000)
     })
   }),

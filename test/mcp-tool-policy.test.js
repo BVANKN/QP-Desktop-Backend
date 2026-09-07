@@ -92,3 +92,53 @@ test('a policy can be summarized before it is saved', () => {
   assert.equal(data.allowed, 0, 'a subject that is off contributes nothing');
   assert.ok(data.total > 0, 'but its size is still reported, so the choice is informed');
 });
+
+// A retry is not a theft.
+//
+// Refresh rotation with reuse detection is right, but the retry window was
+// bound to the client's IP address and lasted ten seconds. Hosted MCP clients
+// call from a provider's egress pool, so two requests of one session routinely
+// arrive from different addresses - and a client that timed out mid-request
+// retried well after ten seconds. Both looked like a stolen token, and the
+// response to a stolen token is to revoke the whole grant, which ended a live
+// task and demanded a fresh sign-in.
+test('a refresh retry survives a changed address and a slow retry', async () => {
+  const { refreshClientFingerprint, replayVerdict } = await import('../src/lib/refresh-replay.js');
+  const now = 1_000;
+  const grace = 90;
+  const client = ua => refreshClientFingerprint({ ip: 'irrelevant', userAgent: ua, includeIp: false });
+  const replay = { previousHash: 'H', fingerprint: client('ChatGPT-User/1.0'), rotatedAt: now };
+  const verdict = (options = {}) => replayVerdict(replay, {
+    previousHash: 'H',
+    fingerprint: options.fingerprint ?? client('ChatGPT-User/1.0'),
+    now: now + (options.after ?? 3),
+    graceSeconds: grace
+  });
+
+  // The address must not decide whether a session lives.
+  assert.notEqual(
+    refreshClientFingerprint({ ip: '52.230.10.7', userAgent: 'x' }),
+    refreshClientFingerprint({ ip: '52.230.10.99', userAgent: 'x' }),
+    'with the address included, one egress pool produces two identities'
+  );
+  assert.equal(
+    refreshClientFingerprint({ ip: '52.230.10.7', userAgent: 'x', includeIp: false }),
+    refreshClientFingerprint({ ip: '52.230.10.99', userAgent: 'x', includeIp: false }),
+    'excluding it, the same client stays the same client'
+  );
+
+  assert.equal(verdict(), 'replay', 'an immediate retry is a retry');
+  assert.equal(verdict({ after: 12 }), 'replay', 'so is one after twelve seconds');
+  assert.equal(verdict({ after: 80 }), 'replay', 'and one after eighty');
+
+  // Refusing costs a round trip; revoking costs the task. They are only
+  // interchangeable if you assume every unrecognised retry is an attack.
+  assert.equal(verdict({ fingerprint: client('curl/8.4') }), 'unverified-client');
+  assert.equal(verdict({ fingerprint: '' }), 'unverified-client');
+
+  // Genuine reuse - a token from further back in the chain, long after its
+  // rotation - is still reuse and must still revoke.
+  assert.equal(verdict({ after: 200 }), 'outside-window');
+  assert.equal(replayVerdict(replay, { previousHash: 'OLDER', fingerprint: client('ChatGPT-User/1.0'), now: now + 3, graceSeconds: grace }), 'unknown');
+  assert.equal(replayVerdict(null, { previousHash: 'H', fingerprint: 'f', now, graceSeconds: grace }), 'unknown');
+});

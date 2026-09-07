@@ -4,7 +4,7 @@ import { randomId, randomToken, safeEqual, sha256Hex } from '../../lib/crypto.js
 import {
   openRefreshReplay,
   refreshClientFingerprint,
-  replayWithinGrace,
+  replayVerdict,
   sealRefreshReplay
 } from '../../lib/refresh-replay.js';
 import { login, logout } from '../auth/auth-service.js';
@@ -414,23 +414,34 @@ export async function refreshOAuthToken(input, requestContext = {}) {
   if (parts.length !== 3 || parts[0] !== 'qport') throw new OAuthError('invalid_grant', 'The refresh token is invalid.');
   const grantId = parts[1];
   const presentedHash = sha256Hex(presented);
-  const fingerprint = refreshClientFingerprint(requestContext);
+  // Hosted MCP clients call from a provider's egress pool, so the address is
+  // deliberately excluded: it changes between two requests of one session.
+  const fingerprint = refreshClientFingerprint({ ...requestContext, includeIp: false });
   const issued = await mutateOAuthGrant(grantId, grant => {
     if (!grant || grant.clientId !== clientId || grant.resource !== resource || grant.revokedAt || grant.refreshExpiresAt <= nowSeconds()) {
       throw new OAuthError('invalid_grant', 'The refresh token is invalid or expired.');
     }
     if ((grant.previousRefreshTokenHashes || []).includes(presentedHash)) {
       const now = nowSeconds();
-      if (replayWithinGrace(grant.refreshReplay, {
+      const verdict = replayVerdict(grant.refreshReplay, {
         previousHash: presentedHash,
         fingerprint,
         now,
         graceSeconds: config.mcp.oauth.refreshRetryGraceSeconds
-      })) {
+      });
+      if (verdict === 'replay') {
         const tokens = openRefreshReplay(grant.refreshReplay?.sealed);
         if (tokens?.accessToken && tokens?.refreshToken) {
           return { write: false, result: { grant, tokens, replayed: true } };
         }
+      }
+      // Inside the retry window but unable to confirm the client: refuse this
+      // one refresh and let it try again with the token it holds. Revoking here
+      // would end a live session over an unverified retry, and the two costs
+      // are not comparable - a refused refresh costs a round trip, a revoked
+      // grant costs the user their task and a fresh sign-in.
+      if (verdict === 'unverified-client') {
+        return { write: false, result: { unverifiedReplay: true, grant } };
       }
       grant.revokedAt = now;
       grant.revokedReason = 'refresh_token_reuse';
@@ -450,6 +461,10 @@ export async function refreshOAuthToken(input, requestContext = {}) {
     grant.lastUsedAt = now;
     return { value: grant, result: { grant, tokens } };
   });
+  if (issued?.unverifiedReplay) {
+    await audit('mcp.oauth.refresh_replay_unverified', { grantId, clientId, userId: issued.grant.userId });
+    throw new OAuthError('invalid_grant', 'This refresh token was already rotated. Retry with the newest refresh token; the session is still valid.');
+  }
   if (issued?.reuseDetected) {
     await audit('mcp.oauth.refresh_reuse_detected', { grantId, clientId, userId: issued.grant.userId });
     throw new OAuthError('invalid_grant', 'Refresh token reuse was detected. Reconnect the MCP app.');

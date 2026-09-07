@@ -16,8 +16,18 @@ function encryptionKey() {
  * duplicate refresh request from replay by a different client. It is never
  * exposed and contains no raw IP or user-agent data.
  */
-export function refreshClientFingerprint({ ip = '', userAgent = '' } = {}) {
-  const normalizedIp = String(ip || '').trim().slice(0, 128);
+/**
+ * Identifies the client retrying a refresh it already made.
+ *
+ * `includeIp` is off for hosted MCP clients. They call from a provider's egress
+ * pool, so two requests from one logical session routinely arrive from
+ * different addresses - and binding the retry window to the address meant a
+ * legitimate retry looked like a stolen token, which revoked the whole grant
+ * mid-task. The address is still recorded for audit; it just no longer decides
+ * whether a session survives.
+ */
+export function refreshClientFingerprint({ ip = '', userAgent = '', includeIp = true } = {}) {
+  const normalizedIp = includeIp ? String(ip || '').trim().slice(0, 128) : '';
   const normalizedAgent = String(userAgent || '').trim().slice(0, 512);
   if (!normalizedIp && !normalizedAgent) return '';
   return sha256Hex(`${normalizedIp}\n${normalizedAgent}`);
@@ -56,9 +66,24 @@ export function openRefreshReplay(value) {
   }
 }
 
-export function replayWithinGrace(replay, { previousHash, fingerprint, now, graceSeconds }) {
-  if (!replay || !previousHash || !fingerprint) return false;
-  if (replay.previousHash !== previousHash || replay.fingerprint !== fingerprint) return false;
+export function replayWithinGrace(replay, options) {
+  return replayVerdict(replay, options) === 'replay';
+}
+
+/**
+ * Why a presented-again refresh token is or is not a replay.
+ *
+ * The distinction matters because the two outcomes are not comparable. Refusing
+ * one refresh costs a retry; declaring reuse revokes the grant and ends the
+ * session. Treating "I cannot confirm this is the same client" as proof of
+ * theft made a narrow, recoverable situation into an unrecoverable one.
+ */
+export function replayVerdict(replay, { previousHash, fingerprint, now, graceSeconds } = {}) {
+  if (!replay || !previousHash) return 'unknown';
+  if (replay.previousHash !== previousHash) return 'unknown';
   const rotatedAt = Number(replay.rotatedAt);
-  return Number.isFinite(rotatedAt) && now >= rotatedAt && now - rotatedAt <= graceSeconds;
+  const inWindow = Number.isFinite(rotatedAt) && now >= rotatedAt && now - rotatedAt <= graceSeconds;
+  if (!inWindow) return 'outside-window';
+  if (!fingerprint || replay.fingerprint !== fingerprint) return 'unverified-client';
+  return 'replay';
 }

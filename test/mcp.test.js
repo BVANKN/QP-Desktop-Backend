@@ -367,8 +367,10 @@ test('ChatGPT-compatible OAuth discovery, DCR, PKCE, refresh rotation, and MCP a
   assert.equal(retry.access_token, refreshed.access_token);
   assert.equal(retry.refresh_token, refreshed.refresh_token);
 
-  // A different client fingerprint presenting that rotated token is still a
-  // replay attack and must revoke the entire grant family.
+  // A retry the server cannot attribute is refused, but the session survives.
+  // It used to be treated as proof of theft and revoked the grant, which ended
+  // a live task: hosted MCP clients call from an egress pool, so an
+  // unrecognised retry is routine rather than evidence of anything.
   const replayResponse = await fetch(`${server.baseUrl}/oauth/token`, {
     method: 'POST',
     headers: {
@@ -385,12 +387,46 @@ test('ChatGPT-compatible OAuth discovery, DCR, PKCE, refresh rotation, and MCP a
   assert.equal(replayResponse.status, 400);
   assert.equal((await replayResponse.json()).error, 'invalid_grant');
 
-  const revokedAfterReplay = await server.call('POST', new URL(resource).pathname + new URL(resource).search, {
+  const stillLive = await server.call('POST', new URL(resource).pathname + new URL(resource).search, {
     jsonrpc: '2.0',
     id: 4,
     method: 'tools/list'
   }, { headers: { Authorization: `Bearer ${refreshed.access_token}`, 'MCP-Protocol-Version': '2025-11-25' } });
-  assert.equal(revokedAfterReplay.status, 401, 'Refresh-token replay must revoke the complete OAuth grant family.');
+  assert.equal(stillLive.status, 200, 'an unattributable retry must not end a live session');
+
+  // Genuine reuse still revokes the whole family. Rotating a second time makes
+  // the original token an old one rather than the just-rotated one, which is
+  // the shape of an actual stolen token: not a retry of the newest rotation,
+  // but a token from further back in the chain.
+  const tokenForm = body => fetch(`${server.baseUrl}/oauth/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams(body)
+  });
+  const secondRotationResponse = await tokenForm({
+    grant_type: 'refresh_token',
+    client_id: registered.body.client_id,
+    refresh_token: refreshed.refresh_token,
+    resource
+  });
+  assert.equal(secondRotationResponse.status, 200);
+  const secondRotation = await secondRotationResponse.json();
+
+  const reuse = await tokenForm({
+    grant_type: 'refresh_token',
+    client_id: registered.body.client_id,
+    refresh_token: tokens.refresh_token,
+    resource
+  });
+  assert.equal(reuse.status, 400);
+  assert.equal((await reuse.json()).error, 'invalid_grant');
+
+  const revokedAfterReuse = await server.call('POST', new URL(resource).pathname + new URL(resource).search, {
+    jsonrpc: '2.0',
+    id: 5,
+    method: 'tools/list'
+  }, { headers: { Authorization: `Bearer ${secondRotation.access_token}`, 'MCP-Protocol-Version': '2025-11-25' } });
+  assert.equal(revokedAfterReuse.status, 401, 'reusing a superseded refresh token must revoke the complete grant family');
 });
 
 
