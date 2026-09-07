@@ -408,7 +408,13 @@ export async function waitForDesktopJob(jobId, timeoutMs, { leavePending = false
 }
 
 export function heartbeatDesktop({ userId, tenantId, environmentId, environmentName, clientInstanceId, appVersion }) {
-  const key = `${userId}:${String(tenantId).toLowerCase()}:${String(environmentId || '').toLowerCase()}:${clientInstanceId || ''}`;
+  // One running desktop is on exactly one environment at a time, so the
+  // environment must not be part of the key. It used to be, which meant
+  // switching environments added a second heartbeat rather than replacing the
+  // first - and the old environment went on looking live for another 25
+  // seconds, long enough for a tool call to be answered against the
+  // environment the person had just navigated away from.
+  const key = `${userId}:${String(tenantId).toLowerCase()}:${clientInstanceId || ''}`;
   for (const [existingKey, value] of desktopHeartbeats) {
     if (Date.now() - Date.parse(value.lastSeenAt) > 120_000) desktopHeartbeats.delete(existingKey);
   }
@@ -435,6 +441,31 @@ export function heartbeatDesktop({ userId, tenantId, environmentId, environmentN
  * "keep Quicker Portal running" when Quicker Portal is already running and
  * heartbeating sends people to look in the one place the fault is not.
  */
+/**
+ * The environment the desktop is on right now, for one user and tenant.
+ *
+ * Some MCP endpoints are addressed by user and tenant only - the Power Pages
+ * URL has no environment segment - so the environment cannot come from the
+ * request. It used to come from whatever was stored on the connection record
+ * when that endpoint was first prepared, which meant signing in and selecting
+ * an environment in Quicker Portal had no effect on it: the record still
+ * pointed at the old one, and jobs were queued against an environment key no
+ * running desktop would ever claim.
+ *
+ * The live heartbeat is the honest answer to "which environment is this
+ * connection for", because it is the one the person is actually looking at.
+ */
+export function currentDesktopEnvironment(userId, tenantId) {
+  const live = [...desktopHeartbeats.values()]
+    .filter(item => item.userId === userId
+      && String(item.tenantId).toLowerCase() === String(tenantId).toLowerCase()
+      && item.environmentId
+      && Date.now() - Date.parse(item.lastSeenAt) < 25_000)
+    .sort((a, b) => b.lastSeenAt.localeCompare(a.lastSeenAt));
+  if (!live.length) return null;
+  return { environmentId: live[0].environmentId, environmentName: live[0].environmentName || '' };
+}
+
 export function desktopWaitFailure(job, phase = 'queued') {
   if (!job) return new Error('Timed out waiting for the connected Quicker Portal desktop. The request is no longer available.');
   const heartbeats = [...desktopHeartbeats.values()]

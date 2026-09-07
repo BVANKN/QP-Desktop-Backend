@@ -4,11 +4,16 @@ import { readJsonBody } from '../../core/http/context.js';
 import { authenticateMcpConnection } from './connections.js';
 import { authenticateMcpOAuthToken } from './oauth.js';
 import { MCP_TOOLS, MCP_TOOL_BY_NAME, publicTool } from './tool-catalog.js';
-import { desktopStatus, enqueueDesktopToolCall, waitForDesktopJob, getDesktopOperation } from './broker.js';
+import { currentDesktopEnvironment, desktopStatus, enqueueDesktopToolCall, waitForDesktopJob, getDesktopOperation } from './broker.js';
 import { recordTransmission } from './analytics.js';
 import { entitlementsForUser } from '../plans/subscription-store.js';
 import { logger } from '../../core/logger.js';
 import { validateSchema } from './schema-validator.js';
+
+// Endpoints addressed by user and tenant only, with no environment segment in
+// the URL. For these the environment is whatever the desktop is on, not
+// whatever was stored when the endpoint was first prepared.
+const ENVIRONMENT_FOLLOWS_DESKTOP = new Set(['powerpages']);
 
 const LATEST_PROTOCOL = '2025-11-25';
 const SUPPORTED_PROTOCOLS = new Set([LATEST_PROTOCOL, '2025-06-18', '2025-03-26']);
@@ -230,6 +235,20 @@ export async function handleMcpRequest(ctx, { scopedToolName, resourceKind = 'po
       throw new Error('The access token is not valid for this MCP endpoint.');
     }
     if ((connection.kind || 'power-platform') !== resourceKind) throw new Error('The access token is not valid for this MCP resource type.');
+
+    // This endpoint is addressed by user and tenant only, so the environment
+    // cannot come from the URL. Taking it from the connection record froze it
+    // at whatever was selected when the endpoint was first prepared: signing in
+    // and choosing an environment in Quicker Portal changed nothing, and jobs
+    // were queued against an environment key no running desktop would claim.
+    // The environment the desktop is on is the environment this connection is
+    // for. Scope is unchanged - the token still fixes the user and the tenant.
+    if (ENVIRONMENT_FOLLOWS_DESKTOP.has(resourceKind)) {
+      const live = currentDesktopEnvironment(connection.userId, connection.tenantId);
+      if (live && String(live.environmentId).toLowerCase() !== String(connection.environmentId || '').toLowerCase()) {
+        connection = { ...connection, environmentId: live.environmentId, environmentName: live.environmentName || connection.environmentName || '' };
+      }
+    }
   } catch (error) {
     return sendMcpJson(ctx, 401, jsonRpcError(null, -32001, error.message), {
       'WWW-Authenticate': `Bearer realm="quicker-portal-mcp", resource_metadata="${resourceMetadataUrl(ctx)}", scope="${INITIAL_OAUTH_SCOPES}"`

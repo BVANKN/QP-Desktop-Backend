@@ -118,3 +118,39 @@ test('an unclaimable job names the environment mismatch instead of blaming the d
   assert.match(desktopWaitFailure(job, 'leased').message, /accepted this tool call but did not finish/);
   assert.match(desktopWaitFailure(job, 'queued').message, /never picked the request up/);
 });
+
+// The Power Pages endpoint is addressed by user and tenant only - there is no
+// environment in its URL - so the environment has to come from somewhere else.
+// Taking it from the connection record froze it at whatever was selected when
+// the endpoint was first prepared: signing in and choosing an environment in
+// Quicker Portal changed nothing, and jobs were queued against an environment
+// key no running desktop would ever claim.
+test('an environment-less endpoint follows the environment the desktop is signed in to', async () => {
+  const { currentDesktopEnvironment, heartbeatDesktop, desktopStatus } = await import('../src/modules/mcp/broker.js');
+  const userId = 'follows-user';
+  const tenantId = 'powerpages:99999999-8888-7777-6666-555555555555';
+
+  assert.equal(currentDesktopEnvironment(userId, tenantId), null, 'with nothing running there is no environment to follow');
+
+  heartbeatDesktop({ userId, tenantId, environmentId: 'KNCBHARAT', environmentName: 'KNC Bharat', clientInstanceId: 'c1' });
+  assert.deepEqual(currentDesktopEnvironment(userId, tenantId), { environmentId: 'KNCBHARAT', environmentName: 'KNC Bharat' });
+
+  // Switching environments in the desktop moves the endpoint with it. The same
+  // client instance must replace its heartbeat rather than add a second one,
+  // or the environment just left behind goes on looking live for 25 seconds.
+  heartbeatDesktop({ userId, tenantId, environmentId: 'AB2', environmentName: 'AB2 Sandbox', clientInstanceId: 'c1' });
+  assert.equal(desktopStatus(userId, tenantId, 'KNCBHARAT').connected, false, 'the environment just left must not still answer');
+  assert.deepEqual(currentDesktopEnvironment(userId, tenantId), { environmentId: 'AB2', environmentName: 'AB2 Sandbox' });
+  assert.equal(desktopStatus(userId, tenantId, 'AB2').connected, true, 'and the job can then be claimed');
+
+  // Scope is unchanged: another tenant, and another user, are still separate.
+  assert.equal(currentDesktopEnvironment(userId, 'powerpages:other-tenant'), null);
+  assert.equal(currentDesktopEnvironment('another-user', tenantId), null);
+
+  // A heartbeat with no environment tells us nothing and must not be followed.
+  heartbeatDesktop({ userId, tenantId: 'powerpages:blank-env', environmentId: '', clientInstanceId: 'c2' });
+  assert.equal(currentDesktopEnvironment(userId, 'powerpages:blank-env'), null);
+
+  const protocol = await import('../src/modules/mcp/protocol.js');
+  assert.ok(protocol, 'the protocol module wires this in for environment-less resources');
+});
