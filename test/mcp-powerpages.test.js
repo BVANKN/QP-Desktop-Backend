@@ -22,7 +22,11 @@ async function register(planId) {
 
 test('Power Pages tool catalog is isolated, model-aware, and risk classified', () => {
   const tools = MCP_TOOLS.filter(item => item.group === 'powerpages');
-  assert.equal(tools.length, 15);
+  assert.equal(tools.length, 16);
+  // Language is site configuration, not a component, so it never showed up in
+  // the component inventory and had no tool of its own.
+  assert.equal(MCP_TOOL_BY_NAME.get('list_power_pages_languages').risk, 'read');
+  assert.equal(MCP_TOOL_BY_NAME.get('list_power_pages_languages').fixedArguments.operation, 'listLanguages');
   assert.ok(tools.every(item => ['powerPagesRead', 'powerPagesWrite', 'powerPagesDelete'].includes(item.action)));
   assert.equal(MCP_TOOL_BY_NAME.get('read_power_pages_component').risk, 'read');
   assert.equal(MCP_TOOL_BY_NAME.get('update_power_pages_component').risk, 'write');
