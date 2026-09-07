@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import readline from 'node:readline';
+import { failureDiagnostics } from './failure-diagnostics.js';
 import { AppendOnlyLog } from '../../lib/json-store.js';
 import { config } from '../../config/config.js';
 import { mongoCollection, mongoEnabled } from '../../lib/mongo.js';
@@ -66,14 +67,25 @@ function summarizePayload(value) {
   };
 }
 
-function redact(value, depth = 0) {
+export function redact(value, depth = 0) {
   if (depth > 12) return '[depth limit]';
   if (Array.isArray(value)) return value.slice(0, 250).map(item => redact(item, depth + 1));
   if (!value || typeof value !== 'object') {
+    if (typeof value === 'string' && /^[\s]*[\[{]/.test(value)) {
+      if (value.length > 64_000) return '[serialized document omitted]';
+      try { return redact(JSON.parse(value), depth + 1); } catch { return '[unparsed document omitted]'; }
+    }
+    if (typeof value === 'string' && /^\s*</.test(value)) return '[XML/source document omitted]';
     if (typeof value === 'string' && value.length > 4000) return `${value.slice(0, 4000)}…[truncated]`;
     return value;
   }
-  return Object.fromEntries(Object.entries(value).map(([key, child]) => [key, SENSITIVE_KEY.test(key) ? '[REDACTED]' : redact(child, depth + 1)]));
+  const sensitiveValue = SENSITIVE_KEY.test(String(value.name || value.key || value.logicalName || ''));
+  const sourceKeys = /^(clientdata|content|source|formxml|layoutxml|definition|oldtext|newtext|text|certificatebase64)$/i;
+  return Object.fromEntries(Object.entries(value).map(([key, child]) => [key,
+    SENSITIVE_KEY.test(key) || (sensitiveValue && /^(value|defaultvalue|currentvalue)$/i.test(key)) ? '[REDACTED]'
+      : sourceKeys.test(key) && typeof child === 'string' ? '[source payload omitted from analytics]'
+      : redact(child, depth + 1)
+  ]));
 }
 
 export async function recordTransmission({ connection, tool, requestId, arguments: args, result, error, startedAt }) {
@@ -100,8 +112,11 @@ export async function recordTransmission({ connection, tool, requestId, argument
     tables: [...new Set([...requestSummary.tables, ...responseSummary.tables])],
     columns: [...new Set([...requestSummary.columns, ...responseSummary.columns])],
     recordIds: [...new Set([...requestSummary.recordIds, ...responseSummary.recordIds])],
-    error: error ? String(error.message || error).slice(0, 4000) : null,
+    // Service errors can echo submitted credentials. Keep classification for
+    // analytics; the original actionable error is returned to the caller only.
+    error: error ? `Operation failed (${String(error.code || 'EXECUTION_ERROR').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 80)}). Inspect the caller response for details.` : null,
     captureMode: connection.captureMode,
+    diagnostics: error ? failureDiagnostics(error, result) : undefined,
     request: connection.captureMode === 'detailed' ? redact(args) : undefined,
     response: connection.captureMode === 'detailed' ? redact(result) : undefined
   };

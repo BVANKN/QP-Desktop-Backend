@@ -4,10 +4,11 @@ import { readJsonBody } from '../../core/http/context.js';
 import { authenticateMcpConnection } from './connections.js';
 import { authenticateMcpOAuthToken } from './oauth.js';
 import { MCP_TOOLS, MCP_TOOL_BY_NAME, publicTool } from './tool-catalog.js';
-import { desktopStatus, enqueueDesktopToolCall, waitForDesktopJob } from './broker.js';
+import { desktopStatus, enqueueDesktopToolCall, waitForDesktopJob, getDesktopOperation } from './broker.js';
 import { recordTransmission } from './analytics.js';
 import { entitlementsForUser } from '../plans/subscription-store.js';
 import { logger } from '../../core/logger.js';
+import { validateSchema } from './schema-validator.js';
 
 const LATEST_PROTOCOL = '2025-11-25';
 const SUPPORTED_PROTOCOLS = new Set([LATEST_PROTOCOL, '2025-06-18', '2025-03-26']);
@@ -21,6 +22,7 @@ const INITIAL_OAUTH_SCOPES = 'mcp:read mcp:write offline_access';
 const TOOL_PAGE_MAX_ITEMS = 20;
 const TOOL_PAGE_MAX_BYTES = 48 * 1024;
 const TOOL_CURSOR_PREFIX = 'qp-tools-v1:';
+const toolDescriptors = new WeakMap();
 
 function jsonRpcError(id, code, message, data) {
   return { jsonrpc: '2.0', id: id ?? null, error: { code, message, ...(data ? { data } : {}) } };
@@ -85,8 +87,14 @@ function pageTools(toolDefinitions, cursor) {
   const tools = [];
   let estimatedBytes = 0;
   for (let index = start; index < toolDefinitions.length && tools.length < TOOL_PAGE_MAX_ITEMS; index += 1) {
-    const exposed = publicTool(toolDefinitions[index]);
-    const toolBytes = Buffer.byteLength(JSON.stringify(exposed));
+    const definition = toolDefinitions[index];
+    let descriptor = toolDescriptors.get(definition);
+    if (!descriptor) {
+      const exposed = publicTool(definition);
+      descriptor = { exposed, bytes: Buffer.byteLength(JSON.stringify(exposed)) };
+      toolDescriptors.set(definition, descriptor);
+    }
+    const { exposed, bytes: toolBytes } = descriptor;
     // Always return at least one tool, even if a future individual descriptor
     // is larger than the normal page budget.
     if (tools.length && estimatedBytes + toolBytes > TOOL_PAGE_MAX_BYTES) break;
@@ -102,62 +110,7 @@ function pageTools(toolDefinitions, cursor) {
   };
 }
 
-function schemaMatches(schema, value) {
-  if (!schema) return true;
-  if (schema.type === 'object' && (!value || typeof value !== 'object' || Array.isArray(value))) return false;
-  if (schema.type === 'array' && !Array.isArray(value)) return false;
-  if (schema.type === 'string' && typeof value !== 'string') return false;
-  if (schema.type === 'boolean' && typeof value !== 'boolean') return false;
-  if (schema.type === 'number' && typeof value !== 'number') return false;
-  if (schema.const !== undefined && value !== schema.const) return false;
-  if (schema.enum && !schema.enum.includes(value)) return false;
-  if (schema.required && (!value || typeof value !== 'object' || schema.required.some(key => !(key in value) || value[key] === undefined || value[key] === null || value[key] === ''))) return false;
-  if (schema.properties && value && typeof value === 'object' && !Array.isArray(value)) {
-    for (const [key, childSchema] of Object.entries(schema.properties)) {
-      if (key in value && !schemaMatches(childSchema, value[key])) return false;
-    }
-  }
-  if (schema.allOf && !schema.allOf.every(item => schemaMatches(item, value))) return false;
-  if (schema.anyOf && !schema.anyOf.some(item => schemaMatches(item, value))) return false;
-  if (schema.oneOf && schema.oneOf.filter(item => schemaMatches(item, value)).length !== 1) return false;
-  return true;
-}
-
-export function validateSchema(schema, value, path = 'arguments', errors = []) {
-  if (!schema) return errors;
-  const objectLike = schema.type === 'object' || Boolean(schema.properties) || Boolean(schema.required);
-  if (objectLike) {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) {
-      errors.push(`${path} must be an object.`);
-      return errors;
-    }
-    for (const key of schema.required || []) {
-      if (!(key in value) || value[key] === undefined || value[key] === null || value[key] === '') errors.push(`${path}.${key} is required.`);
-    }
-    if (schema.additionalProperties === false) {
-      for (const key of Object.keys(value)) if (!Object.hasOwn(schema.properties || {}, key)) errors.push(`${path}.${key} is not supported.`);
-    }
-    for (const [key, child] of Object.entries(value)) if (schema.properties?.[key]) validateSchema(schema.properties[key], child, `${path}.${key}`, errors);
-  } else if (schema.type === 'array') {
-    if (!Array.isArray(value)) errors.push(`${path} must be an array.`);
-    else {
-      if (schema.minItems && value.length < schema.minItems) errors.push(`${path} needs at least ${schema.minItems} items.`);
-      if (schema.maxItems && value.length > schema.maxItems) errors.push(`${path} supports at most ${schema.maxItems} items.`);
-      value.forEach((item, index) => validateSchema(schema.items, item, `${path}[${index}]`, errors));
-    }
-  } else if (schema.type === 'string' && typeof value !== 'string') errors.push(`${path} must be a string.`);
-  else if (schema.type === 'boolean' && typeof value !== 'boolean') errors.push(`${path} must be a boolean.`);
-  else if (schema.type === 'number' && typeof value !== 'number') errors.push(`${path} must be a number.`);
-  if (schema.const !== undefined && value !== schema.const) errors.push(`${path} must equal ${JSON.stringify(schema.const)}.`);
-  if (schema.enum && !schema.enum.includes(value)) errors.push(`${path} must be one of: ${schema.enum.join(', ')}.`);
-  if (typeof value === 'number' && schema.minimum !== undefined && value < schema.minimum) errors.push(`${path} must be at least ${schema.minimum}.`);
-  if (typeof value === 'number' && schema.maximum !== undefined && value > schema.maximum) errors.push(`${path} must be at most ${schema.maximum}.`);
-  for (const child of schema.allOf || []) validateSchema(child, value, path, errors);
-  if (schema.if) validateSchema(schemaMatches(schema.if, value) ? schema.then : schema.else, value, path, errors);
-  if (schema.anyOf && !schema.anyOf.some(item => schemaMatches(item, value))) errors.push(`${path} must satisfy at least one supported argument shape.`);
-  if (schema.oneOf && schema.oneOf.filter(item => schemaMatches(item, value)).length !== 1) errors.push(`${path} must satisfy exactly one supported argument shape.`);
-  return errors;
-}
+export { validateSchema } from './schema-validator.js';
 
 function resultContent(value) {
   let text;
@@ -171,6 +124,14 @@ async function executeTool(ctx, connection, tool, args, id, resourceKind = 'powe
   const validationErrors = validateSchema(tool.inputSchema, args);
   if (tool.annotations.destructiveHint && args?.confirm !== true) validationErrors.push('arguments.confirm must be true after explicit user approval.');
   if (validationErrors.length) return jsonRpcError(id, -32602, 'Invalid tool arguments.', { errors: validationErrors });
+
+  if (tool.execution === 'server' && tool.action === 'mcpOperationStatus') {
+    try {
+      return { jsonrpc: '2.0', id, result: resultContent(await getDesktopOperation({ userId: connection.userId, connectionId: connection.id, operationId: args.operationId })) };
+    } catch (error) {
+      return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: error.message }], isError: true } };
+    }
+  }
 
   const desktop = desktopStatus(connection.userId, connection.tenantId, connection.environmentId);
   if (tool.execution === 'server') {
@@ -196,7 +157,7 @@ async function executeTool(ctx, connection, tool, args, id, resourceKind = 'powe
         ? 'The desktop execution channel is ready. Read current Dataverse state before every write and verify created components afterward.'
         : 'Open Quicker Portal, sign in with this Premium account, select this MCP endpoint’s environment, and keep the desktop app running while the AI works.'
     };
-    await recordTransmission({ connection, tool, requestId, arguments: args, result: value, startedAt });
+    await recordTransmission({ connection, tool, requestId, arguments: args, result: value, startedAt }).catch(error => logger.warn('MCP audit delivery failed after a known result', { message: error.message }));
     return { jsonrpc: '2.0', id, result: resultContent(value) };
   }
   if (!desktop.connected) {
@@ -219,9 +180,13 @@ async function executeTool(ctx, connection, tool, args, id, resourceKind = 'powe
   const startedAt = Date.now();
   const requestId = `mcp_${randomUUID()}`;
   let executionResult;
+  let acceptedJob = false;
   try {
     const job = await enqueueDesktopToolCall({ connection, tool, arguments: args, requestId });
-    const completed = await waitForDesktopJob(job.id, Math.min(tool.timeoutMs, config.mcp.desktopTimeoutMs));
+    acceptedJob = true;
+    // Complete fast calls inline. Long work gets a polling handle before a
+    // hosted client's HTTP deadline; the mutation itself is never re-executed.
+    const completed = await waitForDesktopJob(job.id, Math.min(25_000, tool.timeoutMs, config.mcp.desktopTimeoutMs), { leavePending: true });
     executionResult = completed.result;
     if (executionResult?.ok === false) {
       const desktopError = new Error(executionResult.error || 'Quicker Portal desktop action failed.');
@@ -230,10 +195,13 @@ async function executeTool(ctx, connection, tool, args, id, resourceKind = 'powe
       throw desktopError;
     }
     const value = executionResult?.result ?? executionResult;
-    await recordTransmission({ connection, tool, requestId, arguments: args, result: value, startedAt });
+    // The completion endpoint records both inline and deferred outcomes.
     return { jsonrpc: '2.0', id, result: resultContent(value) };
   } catch (error) {
-    await recordTransmission({ connection, tool, requestId, arguments: args, result: executionResult, error, startedAt }).catch(() => {});
+    if (error.code === 'MCP_OPERATION_PENDING') {
+      return { jsonrpc: '2.0', id, result: resultContent({ ...error.details, pending: true, guidance: error.message, pollTool: resourceKind === 'sharepoint' ? 'get_sharepoint_operation' : resourceKind === 'powerpages' ? 'get_power_pages_operation' : 'get_power_platform_operation' }) };
+    }
+    if (!acceptedJob) await recordTransmission({ connection, tool, requestId, arguments: args, result: executionResult, error, startedAt }).catch(() => {});
     return { jsonrpc: '2.0', id, result: {
       content: [{ type: 'text', text: error.message || 'Quicker Portal tool execution failed.' }],
       structuredContent: {
@@ -315,11 +283,11 @@ export async function handleMcpRequest(ctx, { scopedToolName, resourceKind = 'po
         : isPowerPages
         ? { name: 'Quicker Portal Power Pages MCP', version: '1.0.0', description: 'Builds and operates Power Pages sites through the selected Quicker Portal desktop environment.' }
         : { name: 'Quicker Portal Power Platform MCP', version: '1.0.0', description: 'Executes Power Platform operations through the user-connected Quicker Portal desktop.' },
-      instructions: isSharePoint
+      instructions: "A result with pending=true is accepted work, not success or failure. Poll the returned pollTool with operationId after pollAfterMs; do not resubmit the original mutation. If the status is outcome_unknown, inspect current state before proposing any retry. Report per-item failures and partial/truncated inventory explicitly. " + (isSharePoint
         ? 'The connected Quicker Portal desktop browser session is the only authoritative SharePoint identity and site. Never ask for tenant IDs, client IDs, client secrets, app registrations, Microsoft passwords, cookies, or access tokens. Start with get_sharepoint_connection. Discover current site, drive, list, column, and item IDs before acting. Before changing a list, column, file, or list item, call its exact get/read tool immediately first and use the returned ETag or revision when available; stale writes must be re-read, never forced. For text files use patch_sharepoint_file with the exact SHA-256 revision and targeted anchors returned by read_sharepoint_file; never ask the user to paste the complete file and never reconstruct unchanged content from memory. For list items, send only changed fields using internal column names and the current ETag. Create a list first, then create each requested column with create_sharepoint_column; do not invent internal names or unsupported column types. Column type and internal name are immutable after creation, so create a replacement only after explaining the migration impact. Follow paging links for large libraries and lists. Keep reads bounded. Preview the exact target in your response and use delete tools only after explicit user confirmation. If the desktop or SharePoint session is disconnected, explain that the user must reconnect it in Quicker Portal rather than requesting credentials.'
         : isPowerPages
         ? 'The selected Quicker Portal desktop environment is authoritative. Start with get_power_pages_connection and list_power_pages_sites. Use create_power_pages_site only after confirming the exact environment, name, subdomain, base language, and template. Never assume whether a site uses the standard or enhanced model: get_power_pages_site or inspect_power_pages_inventory detects it. Before updating or deleting a component, call read_power_pages_component immediately first and pass its exact SHA-256 revision; stale writes must be re-read, never forced. Send only changed component fields. Do not ask the user to paste a complete site export. Components include pages, files, templates, snippets, links, forms, lists, table permissions, column permission profiles, roles, access rules, redirects, cloud flows, and UX components. Use site lifecycle and security tools only for documented operations. Certificate private material is accepted only for an explicit local-approved upload and is never returned by read tools. Treat site provisioning, public visibility, WAF, IP restrictions, domains, certificates, SSL, AFD routing, data-model changes, and deletion as high-impact. Explain the exact site and intended effect before writes; destructive calls require confirm=true and fresh current state. Do not claim completion until the desktop returns the operation result and a follow-up read confirms current state.'
-        : 'The selected Quicker Portal desktop and tenant are authoritative. Start every multi-step build with get_power_platform_connection; if it reports offline, stop mutation work and give its exact reconnection instruction. For a new project, create or choose the publisher and unmanaged solution first, then create components with that solution unique name or add existing components explicitly. Use create_relationship for lookups: preflight eligibility and do not claim success unless the result says verified=true and contains the materialized lookup metadata. Build model-driven apps in dependency order: tables and choices, scalar columns, relationships/lookups, forms/views/resources, app components, semantic sitemap, ValidateApp, security access, then publish. After every create, use the corresponding get or inventory tool and treat a missing canonical record as failure. Read the latest component before changing it. For existing cloud flows, forms, views, text web resources, Business Process Flows, and Canvas source, use patch_*: send targeted operations or exact anchors, never ask the user for a complete artifact and never reconstruct unchanged content from memory. For a BPF, call get_business_process_flow immediately first and use its revision; it returns a structural summary of stages and steps by default, so pass include with xaml or clientData only when you are composing an edit against their exact text. Structural BPF edits must change the current XAML and clientdata as a matched pair; never edit generated processstage.clientdata directly. Prefer a Dataverse BPF template for creation; use complete XAML/clientdata only for an exact solution artifact or recovery. Validate before activation, preserve the previous active/draft state unless the user requests a state change, and use the returned rollback token if compilation fails. The desktop performs read-modify-validate-write with stale-write protection. For Canvas, connect and sync, then list/read/search the current .pa.yaml source before revision-bound patches and diff review. Compile success without canonical verification is not success; never claim the Canvas app was updated unless the terminal operation returns verified=true. Use complete replacements only for explicit import or recovery. For two or more rows, always use create_records once instead of repeatedly calling create_record. Preview security privilege changes before applying them. PCF changes belong in source files in the IDE/build workflow; add the resulting component to the solution and verify inventory. Minimize reads, use one logical operation per approval, require confirm=true for destructive changes, and never edit managed components directly.'
+        : 'The selected Quicker Portal desktop and tenant are authoritative. Start every multi-step build with get_power_platform_connection; if it reports offline, stop mutation work and give its exact reconnection instruction. For a new project, create or choose the publisher and unmanaged solution first, then create components with that solution unique name or add existing components explicitly. Use create_relationship for lookups: preflight eligibility and do not claim success unless the result says verified=true and contains the materialized lookup metadata. Build model-driven apps in dependency order: tables and choices, scalar columns, relationships/lookups, forms/views/resources, app components, semantic sitemap, ValidateApp, security access, then publish. After every create, use the corresponding get or inventory tool and treat a missing canonical record as failure. Read the latest component before changing it. For existing cloud flows, forms, views, text web resources, Business Process Flows, and Canvas source, use patch_*: send targeted operations or exact anchors, never ask the user for a complete artifact and never reconstruct unchanged content from memory. For a BPF, call get_business_process_flow immediately first and use its revision; it returns a structural summary of stages and steps by default, so pass include with xaml or clientData only when you are composing an edit against their exact text. Structural BPF edits must change the current XAML and clientdata as a matched pair; never edit generated processstage.clientdata directly. Prefer a Dataverse BPF template for creation; use complete XAML/clientdata only for an exact solution artifact or recovery. Validate before activation, preserve the previous active/draft state unless the user requests a state change, and use the returned rollback token if compilation fails. The desktop performs read-modify-validate-write with stale-write protection. For Canvas, connect and sync, then list/read/search the current .pa.yaml source before revision-bound patches and diff review. Compile success without canonical verification is not success; never claim the Canvas app was updated unless the terminal operation returns verified=true. Use complete replacements only for explicit import or recovery. For two or more rows, always use create_records once instead of repeatedly calling create_record. Preview security privilege changes before applying them. PCF changes belong in source files in the IDE/build workflow; add the resulting component to the solution and verify inventory. Minimize reads, use one logical operation per approval, require confirm=true for destructive changes, and never edit managed components directly.')
     } }, { 'MCP-Protocol-Version': requested });
   }
   if (body.method === 'notifications/initialized' || body.method.startsWith('notifications/')) return sendAccepted(ctx);

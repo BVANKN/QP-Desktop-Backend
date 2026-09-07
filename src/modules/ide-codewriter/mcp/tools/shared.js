@@ -5,6 +5,23 @@ import { AGENT_METHOD, SERVER_EVENT } from '../../bridge/protocol.js';
 import { createLogger } from '../../logger.js';
 
 const log = createLogger('mcp-shared');
+const readsInFlight = new WeakMap();
+
+async function readChunk(agent, workspace, paths, maxBytes) {
+  // Never reuse dirty-buffer reads. Clean reads are shared only while pending,
+  // and only when the authoritative index still identifies the same revision.
+  const entries = paths.map(path => workspace.getFile(path));
+  const shareable = entries.every(entry => entry && !entry.dirty && entry.revision);
+  const key = JSON.stringify([workspace.id, maxBytes, paths, entries.map(entry => entry?.revision)]);
+  let pending = readsInFlight.get(agent);
+  if (!pending) readsInFlight.set(agent, pending = new Map());
+  if (shareable && pending.has(key)) return pending.get(key);
+  const promise = Promise.resolve().then(() => agent.request(AGENT_METHOD.READ_FILES,
+    { workspaceId: workspace.id, paths, maxBytes }, { timeoutMs: config.bridgeRpcTimeoutMs }));
+  if (shareable) pending.set(key, promise);
+  try { return await promise; }
+  finally { if (pending.get(key) === promise) pending.delete(key); }
+}
 
 /**
  * Everything a tool handler needs, derived from the authenticated request.
@@ -84,13 +101,23 @@ export async function resolveTarget(ctx, extra, workspaceId, { toolName, summary
 export async function fetchFiles(ctx, { workspace, agent, paths }) {
   const results = [];
   const misses = [];
+  let resultBytes = 0;
+  const append = file => {
+    const bytes = Buffer.byteLength(JSON.stringify(file));
+    if (resultBytes + bytes > 8 * 1024 * 1024) {
+      results.push({ path: file.path, error: 'READ_RESULT_LIMIT', message: 'The combined file result exceeds 8 MiB. Read this file in a smaller request.' });
+      return;
+    }
+    resultBytes += bytes;
+    results.push(file);
+  };
 
   for (const path of paths) {
     const entry = workspace.getFile(path);
     if (entry && !entry.dirty) {
       const cached = ctx.contentCache.get(workspace.id, path, entry.revision);
       if (cached !== null) {
-        results.push({ path, content: cached, revision: entry.revision, dirty: false, cached: true });
+        append({ path, content: cached, revision: entry.revision, dirty: false, cached: true });
         continue;
       }
     }
@@ -98,15 +125,25 @@ export async function fetchFiles(ctx, { workspace, agent, paths }) {
   }
 
   if (misses.length) {
-    const response = await agent.request(
-      AGENT_METHOD.READ_FILES,
-      { workspaceId: workspace.id, paths: misses, maxBytes: config.maxFileBytes },
-      { timeoutMs: config.bridgeRpcTimeoutMs }
-    );
+    // Index sizes are only estimates; cap each live read too. Worst-case JSON
+    // escaping costs six bytes per source byte. Keep every response under the
+    // bridge's 32 MiB frame budget, even for stale indices and unsaved buffers.
+    const chunks = [];
+    let chunk = [];
+    let estimatedBytes = 0;
+    const maxBytes = Math.min(config.maxFileBytes, 4 * 1024 * 1024);
+    for (const path of misses) {
+      const estimate = 1024 + 6 * Math.min(maxBytes, Math.max(1, workspace.getFile(path)?.size || maxBytes));
+      if (chunk.length && estimatedBytes + estimate > 12 * 1024 * 1024) { chunks.push(chunk); chunk = []; estimatedBytes = 0; }
+      chunk.push(path); estimatedBytes += estimate;
+    }
+    if (chunk.length) chunks.push(chunk);
+    for (const requestedPaths of chunks) {
+    const response = await readChunk(agent, workspace, requestedPaths, maxBytes);
 
     for (const file of response.files || []) {
       if (file.error) {
-        results.push({ path: file.path, error: file.error, message: file.message });
+        append({ path: file.path, error: file.error, message: file.message });
         continue;
       }
       // Cache only clean files: an unsaved buffer's "revision" describes
@@ -122,7 +159,8 @@ export async function fetchFiles(ctx, { workspace, agent, paths }) {
         indexed.size = file.size ?? indexed.size;
         indexed.dirty = Boolean(file.dirty);
       }
-      results.push(file);
+      append(file);
+    }
     }
   }
 

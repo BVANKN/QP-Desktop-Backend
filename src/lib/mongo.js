@@ -112,6 +112,7 @@ async function ensureIndexes(db) {
     db.collection('mcp_jobs').createIndexes([
       { key: { id: 1 }, name: 'mcp_job_id', unique: true },
       { key: { userId: 1, tenantKey: 1, environmentKey: 1, status: 1, createdAt: 1 }, name: 'mcp_job_claim' },
+      { key: { userId: 1, claimKey: 1 }, name: 'mcp_job_claim_replay', unique: true, partialFilterExpression: { claimKey: { $type: 'string' } } },
       { key: { retentionAt: 1 }, name: 'mcp_job_retention', expireAfterSeconds: 0 }
     ]),
     db.collection('oauth_clients').createIndexes([

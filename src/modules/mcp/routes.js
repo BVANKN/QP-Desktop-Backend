@@ -14,6 +14,7 @@ import {
   sharePointMcpConnectionEndpoint
 } from './connections.js';
 import { claimDesktopJobs, completeDesktopJob, desktopStatus, heartbeatDesktop } from './broker.js';
+import { waitForSignal } from './signals.js';
 import { queryTransmissionAnalytics } from './analytics.js';
 import { MCP_TOOLS } from './tool-catalog.js';
 import { handleMcpRequest } from './protocol.js';
@@ -311,8 +312,18 @@ export function registerMcpRoutes(router) {
 
   router.post('/api/mcp/bridge/heartbeat', authenticate, requireMcpEntitlement, async ctx => {
     const body = await readJsonBody(ctx);
-    const desktop = heartbeatDesktop({ userId: ctx.auth.sub, ...body });
+    const desktop = heartbeatDesktop({ ...body, userId: ctx.auth.sub });
     sendJson(ctx, 200, { ok: true, desktop });
+  });
+  router.post('/api/mcp/bridge/wait', authenticate, requireMcpEntitlement, async ctx => {
+    const body = await readJsonBody(ctx);
+    const controller = new AbortController();
+    const close = () => controller.abort();
+    ctx.res.once('close', close);
+    try {
+      const version = await waitForSignal(`desktop:${ctx.auth.sub}`, String(body.after || ''), 25_000, controller.signal);
+      if (!controller.signal.aborted) sendJson(ctx, 200, { ok: true, version });
+    } finally { ctx.res.removeListener('close', close); }
   });
   router.get('/api/mcp/bridge/jobs', authenticate, requireMcpEntitlement, async ctx => {
     const jobs = await claimDesktopJobs({
@@ -324,9 +335,14 @@ export function registerMcpRoutes(router) {
     });
     sendJson(ctx, 200, { ok: true, jobs });
   });
+  router.post('/api/mcp/bridge/jobs', authenticate, requireMcpEntitlement, async ctx => {
+    const body = await readJsonBody(ctx);
+    const jobs = await claimDesktopJobs({ tenantId: String(body.tenantId || ''), environmentId: String(body.environmentId || ''), clientInstanceId: String(body.clientInstanceId || ''), claimId: String(body.claimId || ''), userId: ctx.auth.sub, limit: 1 });
+    sendJson(ctx, 200, { ok: true, jobs });
+  });
   router.post('/api/mcp/bridge/jobs/:jobId/complete', authenticate, requireMcpEntitlement, async ctx => {
     const body = await readJsonBody(ctx, config.mcp.maxPayloadBytes);
-    const job = await completeDesktopJob({ userId: ctx.auth.sub, jobId: ctx.params.jobId, ...body });
+    const job = await completeDesktopJob({ ...body, userId: ctx.auth.sub, jobId: ctx.params.jobId });
     sendJson(ctx, 200, { ok: true, job });
   });
 

@@ -393,6 +393,7 @@ test('ChatGPT-compatible OAuth discovery, DCR, PKCE, refresh rotation, and MCP a
   assert.equal(revokedAfterReplay.status, 401, 'Refresh-token replay must revoke the complete OAuth grant family.');
 });
 
+
 test('OAuth client registration rejects unsafe redirect URIs', async () => {
   const rejected = await server.call('POST', '/oauth/register', {
     client_name: 'Unsafe OAuth client',
@@ -424,6 +425,7 @@ test('tool calls traverse the desktop broker and become environment-scoped analy
   const connection = await createConnection(session, 'detailed');
   const clientInstanceId = 'mcp-test-desktop';
   const heartbeat = await server.call('POST', '/api/mcp/bridge/heartbeat', {
+    userId: 'untrusted-body-cannot-override-authenticated-identity',
     tenantId,
     environmentId,
     environmentName: 'Test environment',
@@ -448,6 +450,7 @@ test('tool calls traverse the desktop broker and become environment-scoped analy
   assert.equal(leased.body.jobs[0].action, 'mcpQueryRecords');
 
   const completed = await server.call('POST', `/api/mcp/bridge/jobs/${leased.body.jobs[0].id}/complete`, {
+    userId: 'untrusted-user', jobId: 'untrusted-job',
     leaseToken: leased.body.jobs[0].leaseToken,
     result: {
       ok: true,

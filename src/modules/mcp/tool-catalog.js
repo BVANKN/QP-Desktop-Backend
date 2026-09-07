@@ -1,5 +1,6 @@
 // MCP-facing capability catalog. Each tool maps to an existing privileged
 // Electron action; the desktop remains the Dataverse security boundary.
+import { extendedTools } from './extended-tools.js';
 const string = description => ({ type: 'string', description });
 const boolean = description => ({ type: 'boolean', description });
 const number = (description, extra = {}) => ({ type: 'number', description, ...extra });
@@ -306,6 +307,7 @@ const commandPreviewMutation = {
 };
 
 export const MCP_TOOLS = Object.freeze([
+  ...extendedTools({ tool, object, string, boolean, array, number }),
   tool('get_power_platform_connection', 'mcpConnectionStatus', 'Check whether the account-scoped MCP endpoint has a live Quicker Portal desktop, which tenant/environment it targets, and how to reconnect it. Call this before a multi-step project build.', object(), { execution: 'server' }),
   tool('environment_overview', 'environmentInsights', 'Summarize tables, flows, solutions, applications, security, and governance signals in the connected environment.'),
   tool('list_tables', 'tables', 'List Dataverse table metadata in the connected environment.', object({ force: boolean('Bypass the desktop metadata cache.') })),
@@ -414,7 +416,7 @@ export const MCP_TOOLS = Object.freeze([
   tool('list_canvas_apps', 'developerAssets', 'List Canvas apps available through Dataverse metadata.', object(), { fixedArguments: { kind: 'canvasApps' } }),
   tool('get_canvas_app', 'developerAssetDetail', 'Get Canvas app metadata and related component details.', object({ id: string('Canvas app GUID.') }, ['id']), { fixedArguments: { kind: 'canvasApps' } }),
   tool('get_canvas_authoring_status', 'canvasAuthoringStatus', 'Get Canvas prerequisites, connection, baseline, pending changes, and operations.', object({ ...canvasContext, appName: string('Optional display name.') }, ['appId'])),
-  tool('connect_canvas_authoring', 'canvasAuthoringStartConnect', 'Connect in the background to this app open in coauthoring-enabled Studio. Returns an operation ID to poll.', object({ ...canvasContext, appName: string('Optional display name.') }, ['appId']), { readOnly: false, timeoutMs: 55_000 }),
+  tool('connect_canvas_authoring', 'canvasAuthoringStartConnect', 'Connect in the background to this app open in coauthoring-enabled Studio. Returns an operation ID to poll.', object({ ...canvasContext, appName: string('Optional display name.'), forceAccountSelect: boolean('Show the Microsoft account selector when reconnecting with a different authoring account.') }, ['appId']), { readOnly: false, timeoutMs: 55_000 }),
   tool('sync_canvas_authoring_source', 'canvasAuthoringStartSync', 'Sync authoritative live source before reads or edits. Returns an operation ID to poll.', object({ ...canvasContext, appName: string('Optional display name.') }, ['appId']), { timeoutMs: 55_000 }),
   tool('get_canvas_authoring_operation', 'canvasAuthoringOperation', 'Get progress/result for a Canvas operation.', object({ ...canvasContext, operationId: string('Start-operation ID; omit for latest.') }, ['appId'])),
   tool('list_canvas_source_files', 'canvasAuthoringFiles', 'List synchronized .pa.yaml files, revisions, sizes, and change states.', object(canvasContext, ['appId'])),
@@ -422,6 +424,7 @@ export const MCP_TOOLS = Object.freeze([
   tool('search_canvas_source', 'canvasAuthoringSearch', 'Search current Canvas YAML before editing.', object({ ...canvasContext, query: string('Text or regex.'), isRegex: boolean('Regex mode.'), caseSensitive: boolean('Case-sensitive mode.'), maxResults: number('1–500 matches.', { minimum: 1, maximum: 500 }) }, ['appId', 'query'])),
   tool('patch_canvas_source_file', 'canvasAuthoringPatchFile', 'Preferred targeted Canvas editor with stale-revision protection. Never ask the user for the whole app. Use create=true and revision "new" only for a new .pa.yaml file.', object({ ...canvasContext, path: canvasPath, expectedRevision: string('Latest read revision, or "new".'), create: boolean('Create a missing file.'), edits: array(canvasAnchoredEdit, 'Ordered exact edits.', { minItems: 1, maxItems: 128 }) }, ['appId', 'path', 'expectedRevision', 'edits']), { readOnly: false, idempotent: true, timeoutMs: 55_000 }),
   tool('delete_canvas_source_file', 'canvasAuthoringDeleteFile', 'Delete one current-revision .pa.yaml file; _EditorState is protected.', object({ ...canvasContext, path: canvasPath, expectedRevision: string('Latest read revision.'), confirm }, ['appId', 'path', 'expectedRevision', 'confirm']), { readOnly: false, destructive: true, timeoutMs: 55_000 }),
+  tool('patch_canvas_source_files', 'canvasAuthoringPatchFiles', 'Batch up to 20 revision-bound local Canvas file edits with one approval and one final diff. Read current source first. Stops on first failure, retaining earlier successful edits; inspect outcomes and skipped count, never replay successes. Review then apply_canvas_authoring_changes once for the batch. Does not compile or publish.', object({ ...canvasContext, files: array(object({ path: canvasPath, expectedRevision: string('Latest file revision, or new for creation.'), create: boolean('Create a missing file.'), edits: array(canvasAnchoredEdit, 'Ordered exact edits.', { minItems: 1, maxItems: 128 }) }, ['path', 'expectedRevision', 'edits']), 'Distinct files with current revisions.', { minItems: 1, maxItems: 20 }) }, ['appId', 'files']), { readOnly: false, timeoutMs: 55_000 }),
   tool('get_canvas_pending_diff', 'canvasAuthoringDiff', 'Summarize pending source changes; path adds exact before/after source.', object({ ...canvasContext, path: canvasPath }, ['appId'])),
   tool('apply_canvas_authoring_changes', 'canvasAuthoringStartCompile', 'Validate, apply, and canonical re-sync in the background. Returns an operation ID; success requires result.verified=true.', object(canvasContext, ['appId']), { readOnly: false, timeoutMs: 55_000 }),
   tool('discard_canvas_pending_changes', 'canvasAuthoringDiscard', 'Restore the synchronized local baseline without changing the live app.', object({ ...canvasContext, confirm }, ['appId', 'confirm']), { readOnly: false, destructive: true, timeoutMs: 55_000 }),
@@ -716,6 +719,7 @@ export const MCP_TOOLS = Object.freeze([
   }, ['siteId','operation']), powerPagesOptions),
   tool('manage_power_pages_site', 'powerPagesWrite', 'Start, stop, restart, convert, or scan a site. Use get_power_pages_site first.', object({
     siteId: powerPagesSiteId,
+    lcid: string('Optional language code for startQuickScan.'),
     operation: { type:'string', enum:['startSite','stopSite','restartSite','convertTrial','startQuickScan','startDeepScan'] },
     values: powerPagesValues
   }, ['siteId','operation']), powerPagesWriteOptions),
@@ -808,6 +812,8 @@ export const MCP_TOOLS = Object.freeze([
   tool('list_sharepoint_list_items', 'mcpSharePointListItems', 'Read a bounded page of SharePoint list items. Follow nextLink for additional pages and avoid broad reads when a specific item is known.', object({
     siteId: sharePointSiteId,
     listId: sharePointListId,
+    selectFields: array(string('Internal column name from list_sharepoint_columns.'), 'Project only required fields to reduce payload size.', { maxItems: 50, uniqueItems: true }),
+    filter: object({ column: string('One internal column name. Prefer an indexed column; Graph can filter only one indexed field at a time.'), operator: { type: 'string', enum: ['eq','ne','lt','le','gt','ge','startswith'] }, value: { type: ['string','number','boolean','null'] } }, ['column','operator','value']),
     pageSize: number('Bounded page size.', { minimum: 1, maximum: 200 }),
     nextLink: string('Opaque continuation URL returned by the preceding page.')
   }, ['siteId', 'listId']), sharePointOptions),
