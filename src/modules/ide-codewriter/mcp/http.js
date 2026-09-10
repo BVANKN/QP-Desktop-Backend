@@ -5,6 +5,7 @@ import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import config from '../config.js';
 import { createMcpServer } from './server.js';
 import { createLogger } from '../logger.js';
+import { mcpAuthFailure } from '../../mcp/auth-failure.js';
 
 const log = createLogger('mcp-http');
 
@@ -73,10 +74,10 @@ export function createMcpRouter(ctx, { authenticate }) {
       next();
     } catch (error) {
       const resourceMetadata = ctx.resourceMetadataUrlFor?.(req) || `${config.baseUrl}/.well-known/oauth-protected-resource/ide/mcp/${encodeURIComponent(req.params.userId || '')}`;
-      res
-        .status(error?.status || 401)
-        .set('WWW-Authenticate', `Bearer realm="quicker-portal-ide", resource_metadata="${resourceMetadata}", scope="mcp:read mcp:write"`)
-        .json(rpcError(-32001, error?.message || 'The IDE MCP access token is invalid.'));
+      const failure = mcpAuthFailure(error);
+      if (failure.challenge) res.set('WWW-Authenticate', `Bearer realm="quicker-portal-ide", error="invalid_token", resource_metadata="${resourceMetadata}", scope="mcp:read mcp:write offline_access"`);
+      if (failure.status === 503) res.set('Retry-After', '5');
+      res.status(failure.status).json(rpcError(failure.code, failure.message));
     }
   };
 

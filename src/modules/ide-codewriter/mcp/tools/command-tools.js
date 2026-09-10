@@ -124,6 +124,9 @@ export function registerCommandTools(server, ctx) {
       description:
         'Runs a command in the workspace root on the user\'s machine and returns its exit code, stdout ' +
         'and stderr.\n\n' +
+        'TOOL DISCOVERY: this is the user\'s machine, not an isolated environment. Use get_environment ' +
+        'and installed tool paths. A PATH, runtime, timeout, or permission error does not justify reinstalling. ' +
+        'For project-local .NET tools inspect the manifest and use dotnet tool run. Diagnose first.\n\n' +
         'This is how you verify your work. After changing code in a project folder you are REQUIRED to ' +
         'run the checks listed by get_workspace_overview and get them passing; finish_task will refuse ' +
         'to succeed otherwise.\n\n' +
@@ -393,16 +396,16 @@ export function registerCommandTools(server, ctx) {
 
       // A missing program is the most informative failure there is, and
       // rendering it as "EXIT: null" throws that away. Say what is missing and
-      // how to establish that, so the model asks for an install instead of
-      // retrying the same command.
+      // how to establish that without turning a PATH/runtime failure into
+      // an unnecessary installation.
       if (response.error === 'PROGRAM_NOT_FOUND') {
         return fail(
-          `"${argv[0]}" is not installed on this machine, or is not on PATH.\n\n` +
+          `"${argv[0]}" could not be resolved or started by the desktop. This does not prove it is uninstalled.\n\n` +
             `${response.message || ''}\n\n` +
-            'Call get_environment to see exactly what IS installed, the OS and CPU, and which package ' +
-            'manager is available, before proposing an install. Do not guess the platform.\n\n' +
-            'Installing is permitted but always asks the user first, so tell them what you are about to ' +
-            'install and why, then run it.',
+            'Call get_environment and use the resolved installed tool path. Check Developer Setup overrides, ' +
+            'the .NET runtime/DOTNET_ROOT, permissions, and project-local tool manifests. Do not reinstall ' +
+            'to work around discovery failures. Only propose installation after confirming the tool is absent, ' +
+            'and follow the user\'s approval policy.',
           { error: response.error, program: argv[0] }
         );
       }
@@ -416,6 +419,8 @@ export function registerCommandTools(server, ctx) {
           { error: response.error }
         );
       }
+
+      if (response.error) return fail(response.message || 'The desktop could not start this command.', { error: response.error, program: argv[0] });
 
       // Record the run against the verification state, but only for commands
       // the project actually declared as checks.

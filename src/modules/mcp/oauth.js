@@ -345,6 +345,13 @@ function pkceMatches(verifier, challenge) {
 }
 
 function createGrantTokens(grant, includeRefreshToken = true) {
+  // Refresh can race with an already-dispatched call using the previous token.
+  // Preserve its original expiry; revoking the grant still rejects every token.
+  const now = nowSeconds();
+  grant.previousAccessTokens = (grant.previousAccessTokens || []).filter(item => item.expiresAt > now).slice(-15);
+  if (grant.accessTokenHash && grant.accessExpiresAt > now) {
+    grant.previousAccessTokens.push({ hash: grant.accessTokenHash, expiresAt: grant.accessExpiresAt });
+  }
   const accessSecret = randomToken(32);
   const accessToken = `qpoat.${grant.id}.${accessSecret}`;
   const refreshSecret = includeRefreshToken ? randomToken(32) : '';
@@ -362,7 +369,7 @@ function tokenResponse(grant, tokens) {
   return {
     access_token: tokens.accessToken,
     token_type: 'Bearer',
-    expires_in: config.mcp.oauth.accessTtlSeconds,
+    expires_in: Math.max(0, grant.accessExpiresAt - nowSeconds()),
     scope: grant.scopes.join(' '),
     ...(tokens.refreshToken ? { refresh_token: tokens.refreshToken } : {})
   };
@@ -418,7 +425,7 @@ export async function refreshOAuthToken(input, requestContext = {}) {
   // deliberately excluded: it changes between two requests of one session.
   const fingerprint = refreshClientFingerprint({ ...requestContext, includeIp: false });
   const issued = await mutateOAuthGrant(grantId, grant => {
-    if (!grant || grant.clientId !== clientId || grant.resource !== resource || grant.revokedAt || grant.refreshExpiresAt <= nowSeconds()) {
+    if (!grant || grant.clientId !== clientId || (resource && grant.resource !== resource) || grant.revokedAt || grant.refreshExpiresAt <= nowSeconds()) {
       throw new OAuthError('invalid_grant', 'The refresh token is invalid or expired.');
     }
     if ((grant.previousRefreshTokenHashes || []).includes(presentedHash)) {
@@ -480,7 +487,7 @@ export async function revokeOAuthToken(input) {
   const tokenHash = sha256Hex(presented);
   await mutateOAuthGrant(parts[1], grant => {
     if (!grant) return { result: null };
-    if (safeEqual(grant.accessTokenHash, tokenHash) || safeEqual(grant.refreshTokenHash, tokenHash)) {
+    if (safeEqual(grant.accessTokenHash, tokenHash) || safeEqual(grant.refreshTokenHash, tokenHash) || (grant.previousAccessTokens || []).some(item => safeEqual(item.hash, tokenHash))) {
       grant.revokedAt = nowSeconds();
       grant.revokedReason = 'client_revocation';
     }
@@ -529,7 +536,11 @@ export async function authenticateMcpOAuthToken({ authorization, resource }) {
   const parts = token.split('.');
   if (parts.length !== 3 || parts[0] !== 'qpoat') throw new OAuthError('invalid_token', 'The OAuth access token is invalid.', 401);
   const grant = await findOAuthGrantRecord(parts[1]);
-  if (!grant || grant.revokedAt || grant.accessExpiresAt <= nowSeconds() || grant.resource !== resource || !safeEqual(grant.accessTokenHash, sha256Hex(token))) {
+  const hash = sha256Hex(token);
+  const now = nowSeconds();
+  const validToken = grant && ((grant.accessExpiresAt > now && safeEqual(grant.accessTokenHash, hash))
+    || (grant.previousAccessTokens || []).some(item => item.expiresAt > now && safeEqual(item.hash, hash)));
+  if (!grant || grant.revokedAt || grant.resource !== resource || !validToken) {
     throw new OAuthError('invalid_token', 'The OAuth access token is invalid, expired, or intended for another resource.', 401);
   }
   const connection = await findMcpConnectionById(grant.connectionId);

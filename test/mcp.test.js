@@ -335,6 +335,13 @@ test('ChatGPT-compatible OAuth discovery, DCR, PKCE, refresh rotation, and MCP a
   }, { headers: { Authorization: `Bearer ${tokens.access_token}`, 'MCP-Protocol-Version': '2025-11-25' } });
   assert.equal(wrongAudience.status, 401, 'An access token must be bound to the exact MCP resource URI.');
 
+  const wrongRefreshResource = await fetch(`${server.baseUrl}/oauth/token`, {
+    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ grant_type: 'refresh_token', client_id: registered.body.client_id, refresh_token: tokens.refresh_token, resource: `${resource}/different-resource` })
+  });
+  assert.equal(wrongRefreshResource.status, 400);
+  assert.equal((await wrongRefreshResource.json()).error, 'invalid_grant', 'Refresh cannot change the authorized resource.');
+
   const refreshResponse = await fetch(`${server.baseUrl}/oauth/token`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -348,6 +355,19 @@ test('ChatGPT-compatible OAuth discovery, DCR, PKCE, refresh rotation, and MCP a
   const refreshed = await refreshResponse.json();
   assert.equal(refreshResponse.status, 200, JSON.stringify(refreshed));
   assert.notEqual(refreshed.refresh_token, tokens.refresh_token);
+
+  const overlappingCall = await server.call('GET', new URL(resource).pathname + new URL(resource).search, undefined,
+    { headers: { Authorization: `Bearer ${tokens.access_token}` } });
+  assert.equal(overlappingCall.status, 405, 'An unexpired access token remains authenticated after refresh; GET advertises POST-only transport.');
+
+  const { mutateOAuthGrant } = await import('../src/modules/mcp/oauth-store.js');
+  await mutateOAuthGrant(tokens.access_token.split('.')[1], grant => {
+    grant.previousAccessTokens.forEach(token => { token.expiresAt = Math.floor(Date.now() / 1000) - 1; });
+    return { value: grant };
+  });
+  const expiredOverlap = await server.call('GET', new URL(resource).pathname + new URL(resource).search, undefined,
+    { headers: { Authorization: `Bearer ${tokens.access_token}` } });
+  assert.equal(expiredOverlap.status, 401, 'Keeping a previous token must never extend its original expiry.');
 
   // A duplicate request from the same MCP client can happen when refreshes race
   // at access-token expiry or the first response is lost. Return the exact same
@@ -406,10 +426,9 @@ test('ChatGPT-compatible OAuth discovery, DCR, PKCE, refresh rotation, and MCP a
   const secondRotationResponse = await tokenForm({
     grant_type: 'refresh_token',
     client_id: registered.body.client_id,
-    refresh_token: refreshed.refresh_token,
-    resource
+    refresh_token: refreshed.refresh_token
   });
-  assert.equal(secondRotationResponse.status, 200);
+  assert.equal(secondRotationResponse.status, 200, 'Omitting the optional refresh resource preserves the originally bound resource.');
   const secondRotation = await secondRotationResponse.json();
 
   const reuse = await tokenForm({
@@ -427,6 +446,9 @@ test('ChatGPT-compatible OAuth discovery, DCR, PKCE, refresh rotation, and MCP a
     method: 'tools/list'
   }, { headers: { Authorization: `Bearer ${secondRotation.access_token}`, 'MCP-Protocol-Version': '2025-11-25' } });
   assert.equal(revokedAfterReuse.status, 401, 'reusing a superseded refresh token must revoke the complete grant family');
+  const revokedPreviousAccess = await server.call('GET', new URL(resource).pathname + new URL(resource).search, undefined,
+    { headers: { Authorization: `Bearer ${refreshed.access_token}` } });
+  assert.equal(revokedPreviousAccess.status, 401, 'Revocation also rejects unexpired access tokens retained for overlapping calls.');
 });
 
 

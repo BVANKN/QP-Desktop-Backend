@@ -262,7 +262,7 @@ export function registerWorkspaceTools(server, ctx) {
         'Reports the operating system, CPU architecture, and which development tools are actually ' +
         'installed on the user\'s machine — with versions.\n\n' +
         'Call this BEFORE suggesting or running any install, build, or toolchain command. Everything ' +
-        'here was verified by running the tool, not assumed: it is the difference between "you are ' +
+        'reports resolved paths and version-probe status; an unresolved or failed probe is not proof of absence. It is the difference between "you are ' +
         'probably on a Mac so try Homebrew" and knowing the OS, the chip, whether Homebrew exists and ' +
         'where, and whether the SDK you are about to install is already present.\n\n' +
         'It also reports the command policy, so you can tell the user exactly what to permit rather ' +
@@ -292,18 +292,22 @@ export function registerWorkspaceTools(server, ctx) {
 
       if (env.platform === 'darwin') {
         lines.push(
-          `  Homebrew:  ${env.homebrewPrefix ? `installed at ${env.homebrewPrefix}` : 'NOT installed'}`
+          `  Homebrew:  ${env.homebrewPrefix ? `installed at ${env.homebrewPrefix}` : 'not resolved in known locations'}`
         );
       }
 
       lines.push('', 'INSTALLED TOOLS');
       for (const tool of env.installed) {
         lines.push(`  ${tool.id.padEnd(10)} ${(tool.version || 'present').padEnd(12)} ${tool.role}`);
+        if (tool.path) lines.push(`    Executable: ${tool.path}`);
+        if (tool.note) lines.push(`    Status: ${tool.status || 'unknown'} — ${tool.note}`);
       }
 
       if (env.missing?.length) {
-        lines.push('', 'NOT INSTALLED', `  ${env.missing.join(', ')}`);
+        lines.push('', 'UNRESOLVED (not proof of absence)', `  ${env.missing.join(', ')}`);
       }
+      if (env.discoveryWarning) lines.push('', env.discoveryWarning);
+      lines.push('', env.toolDiscoveryGuidance || 'Check executable paths and required runtimes before proposing installation. This is not an isolated machine.');
 
       const policy = env.commandPolicy || {};
       lines.push(

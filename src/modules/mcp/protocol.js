@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { config } from '../../config/config.js';
 import { readJsonBody } from '../../core/http/context.js';
 import { authenticateMcpConnection } from './connections.js';
-import { authenticateMcpOAuthToken } from './oauth.js';
+import { authenticateMcpOAuthToken, OAuthError } from './oauth.js';
+import { mcpAuthFailure } from './auth-failure.js';
 import { MCP_TOOLS, MCP_TOOL_BY_NAME, publicTool } from './tool-catalog.js';
 import { toolAllowed } from './tool-policy.js';
 import { currentDesktopEnvironment, desktopStatus, enqueueDesktopToolCall, waitForDesktopJob, getDesktopOperation } from './broker.js';
@@ -233,9 +234,9 @@ export async function handleMcpRequest(ctx, { scopedToolName, resourceKind = 'po
       ? await authenticateMcpConnection({ userId: ctx.params.userId, tenantId: endpointTenantId, authorization })
       : await authenticateMcpOAuthToken({ authorization, resource: requestResourceUrl(ctx) });
     if (connection.userId !== ctx.params.userId || connection.tenantId.toLowerCase() !== String(endpointTenantId).toLowerCase()) {
-      throw new Error('The access token is not valid for this MCP endpoint.');
+      throw new OAuthError('invalid_token', 'The access token is not valid for this MCP endpoint.', 401);
     }
-    if ((connection.kind || 'power-platform') !== resourceKind) throw new Error('The access token is not valid for this MCP resource type.');
+    if ((connection.kind || 'power-platform') !== resourceKind) throw new OAuthError('invalid_token', 'The access token is not valid for this MCP resource type.', 401);
 
     // This endpoint is addressed by user and tenant only, so the environment
     // cannot come from the URL. Taking it from the connection record froze it
@@ -251,9 +252,11 @@ export async function handleMcpRequest(ctx, { scopedToolName, resourceKind = 'po
       }
     }
   } catch (error) {
-    return sendMcpJson(ctx, 401, jsonRpcError(null, -32001, error.message), {
-      'WWW-Authenticate': `Bearer realm="quicker-portal-mcp", resource_metadata="${resourceMetadataUrl(ctx)}", scope="${INITIAL_OAUTH_SCOPES}"`
-    });
+    const failure = mcpAuthFailure(error);
+    if (failure.status === 503) logger.warn('MCP authentication service unavailable', { requestId: ctx.requestId, error: error.name });
+    return sendMcpJson(ctx, failure.status, jsonRpcError(null, failure.code, failure.message), failure.challenge ? {
+      'WWW-Authenticate': `Bearer realm="quicker-portal-mcp", error="invalid_token", resource_metadata="${resourceMetadataUrl(ctx)}", scope="${INITIAL_OAUTH_SCOPES}"`
+    } : failure.status === 503 ? { 'Retry-After': '5' } : {});
   }
 
   // Authenticate method probes before returning transport capabilities. This
