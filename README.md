@@ -130,6 +130,7 @@ continues to apply field-name redaction.
 | Method | Endpoint | Auth | Purpose |
 |---|---|---|---|
 | GET | `/api/health` | — | Liveness probe |
+| GET | `/api/version` | — | Running commit, startup time, and effective MCP OAuth lifetimes (no credentials) |
 | GET | `/api/plans` | — | Plan catalog |
 | POST | `/api/auth/signup/start` | — | Begin signup, email a code |
 | POST | `/api/auth/signup/resend` | — | Resend the code (throttled) |
@@ -267,6 +268,30 @@ The default `outbox` transport writes each message as a `.eml` file under
 ```bash
 grep -h "code is" data/outbox/*.eml | tail -1
 ```
+
+## Verify the deployed backend version
+
+After pushing this backend repository and waiting for deployment, open
+`https://qp-desktop-backend-1.onrender.com/api/version` (or your own host).
+Compare its `commit` with `git rev-parse HEAD` in the backend checkout **after
+committing**. Render supplies the deployed SHA automatically through
+[`RENDER_GIT_COMMIT`](https://render.com/docs/environment-variables).
+Other hosts can set `QP_BUILD_COMMIT` to the full deployed commit SHA.
+
+The public response is not cached and does not read database records or expose
+credentials. `version` is the package version, `startedAt` is the process startup
+timestamp (not build time), and `time` is the current response time. `mcpOAuth`
+reports the effective access-token, refresh-token, and refresh-retry-grace
+lifetimes in seconds, including deployment configuration overrides.
+
+- Matching `commit`: that backend revision is serving this request.
+- Different `commit`: a different revision is serving it; inspect deployment status.
+- `commit: null`: revision metadata is missing/invalid; deployment identity is unknown.
+- HTTP 404: this route is not available at that host; check deployment and URL.
+
+A matching revision confirms rollout, **not** that reconnects are fixed. Verify
+automatic renewal for both IDE and Power Platform across token-expiry boundaries.
+The endpoint does not refresh, revoke, or otherwise alter any connections.
 
 ## Deployment: MongoDB Atlas persistence
 

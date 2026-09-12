@@ -5,6 +5,7 @@ import { readJsonBody, sendJson } from './core/http/context.js';
 import { authenticate } from './core/middleware/authenticate.js';
 import { consumeRateLimit } from './core/middleware/rate-limit.js';
 import { config } from './config/config.js';
+import { buildInfo } from './lib/build-info.js';
 import {
   requireObject,
   cleanString,
@@ -37,6 +38,21 @@ export function buildRouter({ ideMcp } = {}) {
   const router = new Router();
 
   registerMcpRoutes(router);
+
+  // Public, read-only deployment diagnostics; no database or credential access.
+  router.get('/api/version', ctx => {
+    sendJson(ctx, 200, {
+      ok: true,
+      service: 'qp-x-xrm-backend',
+      ...buildInfo,
+      time: new Date().toISOString(),
+      mcpOAuth: {
+        accessTtlSeconds: config.mcp.oauth.accessTtlSeconds,
+        refreshTtlSeconds: config.mcp.oauth.refreshTtlSeconds,
+        refreshRetryGraceSeconds: config.mcp.oauth.refreshRetryGraceSeconds
+      }
+    });
+  });
 
   router.get('/api/health', async ctx => {
     // Storage health is reported here because the failure it describes is
