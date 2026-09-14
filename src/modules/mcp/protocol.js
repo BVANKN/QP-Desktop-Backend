@@ -6,6 +6,7 @@ import { authenticateMcpOAuthToken, OAuthError } from './oauth.js';
 import { mcpAuthFailure } from './auth-failure.js';
 import { MCP_TOOLS, MCP_TOOL_BY_NAME, publicTool } from './tool-catalog.js';
 import { toolAllowed } from './tool-policy.js';
+import { RESUMABLE_PLUGIN_TOOLS, operationContract, pollToolFor } from './operation-contract.js';
 import { currentDesktopEnvironment, desktopStatus, enqueueDesktopToolCall, waitForDesktopJob, getDesktopOperation } from './broker.js';
 import { recordTransmission } from './analytics.js';
 import { entitlementsForUser } from '../plans/subscription-store.js';
@@ -127,14 +128,22 @@ function resultContent(value) {
   return { content: [{ type: 'text', text }], structuredContent, isError: false };
 }
 
-async function executeTool(ctx, connection, tool, args, id, resourceKind = 'power-platform') {
+async function executeTool(ctx, connection, tool, args, id, resourceKind = 'power-platform', scopedToolName = '') {
   const validationErrors = validateSchema(tool.inputSchema, args);
   if (tool.annotations.destructiveHint && args?.confirm !== true) validationErrors.push('arguments.confirm must be true after explicit user approval.');
   if (validationErrors.length) return jsonRpcError(id, -32602, 'Invalid tool arguments.', { errors: validationErrors });
 
-  if (tool.execution === 'server' && tool.action === 'mcpOperationStatus') {
+  const resume = RESUMABLE_PLUGIN_TOOLS.has(tool.name) && Object.hasOwn(args, 'resumeOperationId');
+  if (resume || (tool.execution === 'server' && tool.action === 'mcpOperationStatus')) {
     try {
-      return { jsonrpc: '2.0', id, result: resultContent(await getDesktopOperation({ userId: connection.userId, connectionId: connection.id, operationId: args.operationId })) };
+      const operation = await getDesktopOperation({
+        userId: connection.userId, connectionId: connection.id,
+        operationId: resume ? args.resumeOperationId : args.operationId,
+        expectedToolName: resume ? tool.name : scopedToolName && scopedToolName !== tool.name ? scopedToolName : undefined
+      });
+      const result = resultContent(operationContract(operation, resourceKind));
+      result.isError = ['failed', 'expired'].includes(operation.status) || operation.result?.ok === false;
+      return { jsonrpc: '2.0', id, result };
     } catch (error) {
       return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: error.message }], isError: true } };
     }
@@ -206,7 +215,7 @@ async function executeTool(ctx, connection, tool, args, id, resourceKind = 'powe
     return { jsonrpc: '2.0', id, result: resultContent(value) };
   } catch (error) {
     if (error.code === 'MCP_OPERATION_PENDING') {
-      return { jsonrpc: '2.0', id, result: resultContent({ ...error.details, pending: true, guidance: error.message, pollTool: resourceKind === 'sharepoint' ? 'get_sharepoint_operation' : resourceKind === 'powerpages' ? 'get_power_pages_operation' : 'get_power_platform_operation' }) };
+      return { jsonrpc: '2.0', id, result: resultContent(operationContract({ ...error.details, toolName: tool.name, completed: false }, resourceKind)) };
     }
     if (!acceptedJob) await recordTransmission({ connection, tool, requestId, arguments: args, result: executionResult, error, startedAt }).catch(() => {});
     return { jsonrpc: '2.0', id, result: {
@@ -326,7 +335,8 @@ export async function handleMcpRequest(ctx, { scopedToolName, resourceKind = 'po
         'WWW-Authenticate': `Bearer resource_metadata="${resourceMetadataUrl(ctx)}", error="insufficient_scope", scope="${INITIAL_OAUTH_SCOPES}"`
       });
     }
-    const definitions = scopedToolName ? resourceTools.filter(item => item.name === scopedToolName) : resourceTools;
+    const scopedAvailable = resourceTools.some(item => item.name === scopedToolName);
+    const definitions = scopedToolName ? resourceTools.filter(item => item.name === scopedToolName || (scopedAvailable && item.name === pollToolFor(resourceKind))) : resourceTools;
     const page = pageTools(definitions, body.params?.cursor);
     if (!page) return sendMcpJson(ctx, 200, jsonRpcError(body.id, -32602, 'The tools/list cursor is invalid or expired.'));
     logger.info('MCP tool catalog page listed.', {
@@ -361,7 +371,7 @@ export async function handleMcpRequest(ctx, { scopedToolName, resourceKind = 'po
   }
   if (body.method === 'tools/call') {
     const requestedName = String(body.params?.name || '');
-    if (scopedToolName && requestedName !== scopedToolName) return sendMcpJson(ctx, 200, jsonRpcError(body.id, -32602, `This endpoint only exposes ${scopedToolName}.`));
+    if (scopedToolName && requestedName !== scopedToolName && !(requestedName === pollToolFor(resourceKind) && resourceTools.some(item => item.name === scopedToolName))) return sendMcpJson(ctx, 200, jsonRpcError(body.id, -32602, `This endpoint only exposes ${scopedToolName} and its operation-status tool.`));
     const tool = MCP_TOOL_BY_NAME.get(requestedName);
     if (!tool || tool.group !== resourceKind) return sendMcpJson(ctx, 200, jsonRpcError(body.id, -32602, `Unknown tool: ${requestedName}.`));
     // Enforced here too, not only in the advertised list: a client may have
@@ -381,7 +391,7 @@ export async function handleMcpRequest(ctx, { scopedToolName, resourceKind = 'po
         'WWW-Authenticate': `Bearer resource_metadata="${resourceMetadataUrl(ctx)}", error="insufficient_scope", scope="${INITIAL_OAUTH_SCOPES}"`
       });
     }
-    const response = await executeTool(ctx, connection, tool, body.params?.arguments || {}, body.id, resourceKind);
+    const response = await executeTool(ctx, connection, tool, body.params?.arguments || {}, body.id, resourceKind, scopedToolName);
     return sendMcpJson(ctx, 200, response);
   }
   if (isNotification) return sendAccepted(ctx);

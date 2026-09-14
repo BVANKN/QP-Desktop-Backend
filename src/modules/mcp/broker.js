@@ -525,11 +525,11 @@ function pendingDesktopOperation(job) {
   throw error;
 }
 
-export async function getDesktopOperation({ userId, connectionId, operationId }) {
+export async function getDesktopOperation({ userId, connectionId, operationId, expectedToolName }) {
   const job = mongoEnabled()
     ? await (await mongoCollection('mcp_jobs')).findOne({ id: operationId, userId, connectionId })
     : (await store.read()).jobs.find(item => item.id === operationId && item.userId === userId && item.connectionId === connectionId);
-  if (!job) throw new NotFoundError('This operation is not available to this MCP connection.');
+  if (!job || (expectedToolName && job.toolName !== expectedToolName)) throw new NotFoundError('This operation is not available to this MCP connection and tool.');
   const overdue = Date.parse(job.expiresAt) <= Date.now();
   const status = overdue && job.status === 'leased' ? 'outcome_unknown' : overdue && job.status === 'queued' ? 'expired' : job.status;
   return {

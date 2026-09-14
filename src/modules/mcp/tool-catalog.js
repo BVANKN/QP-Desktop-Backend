@@ -1,6 +1,7 @@
 // MCP-facing capability catalog. Each tool maps to an existing privileged
 // Electron action; the desktop remains the Dataverse security boundary.
 import { extendedTools } from './extended-tools.js';
+import { RESUMABLE_PLUGIN_TOOLS, resumableSchema } from './operation-contract.js';
 const string = description => ({ type: 'string', description });
 const boolean = description => ({ type: 'boolean', description });
 const number = (description, extra = {}) => ({ type: 'number', description, ...extra });
@@ -14,6 +15,10 @@ const object = (properties = {}, required = []) => ({
 
 function tool(name, action, description, inputSchema = object(), options = {}) {
   const readOnly = options.readOnly !== false;
+  if (RESUMABLE_PLUGIN_TOOLS.has(name)) {
+    inputSchema = resumableSchema(inputSchema);
+    description += ' If this returns pending, retrieve the existing result by calling this same tool with only resumeOperationId. This reads the prior job without reopening the picker or repeating registration. On completion, output contains the original result (including artifactToken for file selection).';
+  }
   return Object.freeze({
     name,
     action,
@@ -592,7 +597,14 @@ export const MCP_TOOLS = Object.freeze([
   tool('get_plugin_trace_log', 'pluginTraceLogDetail', 'Get a plug-in trace record including exception, message block, configuration, and performance details.', object({ pluginTraceLogId: string('Plug-in trace log GUID.') }, ['pluginTraceLogId'])),
   tool('set_plugin_trace_level', 'setPluginTraceSetting', 'Set environment plug-in trace logging level.', object({ level: { type: 'string', enum: ['Off', 'Exception', 'All'], description: 'Trace logging level.' }, confirm: boolean('Confirm the environment-wide trace setting change.') }, ['level', 'confirm']), { readOnly: false, idempotent: true }),
   tool('set_plugin_steps_state', 'setPluginStepsState', 'Enable or disable selected plug-in steps.', object({ stepIds: { type: 'array', items: string('SDK message processing step GUID.'), minItems: 1, maxItems: 200 }, enabled: boolean('True to enable, false to disable.'), confirm: boolean('Confirm changing plug-in execution.') }, ['stepIds', 'enabled', 'confirm']), { readOnly: false, idempotent: true }),
-  tool('choose_plugin_artifact', 'selectPluginArtifact', 'Open the connected desktop file picker for a compiled .dll or .nupkg and return a short-lived artifact token.', object({ mode: { type: 'string', enum: ['register', 'update'], description: 'Register accepts .dll or .nupkg; update accepts .dll.' } }, ['mode']), { readOnly: false }),
+  tool('choose_plugin_artifact', 'selectPluginArtifact', 'Select a compiled .dll or .nupkg on the connected desktop and return a short-lived artifact token. Supply defaultPath from the actual desktop build output so the user does not have to find it. picker opens that file/folder; confirm offers Use this file, Browse instead, or Cancel for an exact file. A missing file opens the nearest existing parent folder. File consent is required even in hands-free mode; this tool does not register or upload the file. Never invent a path or use a hosted/backend path. If canceled, stop and ask the user rather than repeatedly opening dialogs.', {
+    ...object({
+      mode: { type: 'string', enum: ['register', 'update'], description: 'Register accepts .dll or .nupkg; update accepts .dll.' },
+      defaultPath: { type: 'string', minLength: 1, maxLength: 1024, description: 'Known absolute file/folder path on the connected desktop, or ~/ path. Use an exact built .dll/.nupkg for confirm mode. Not a URL or a path on the MCP host.' },
+      selectionMode: { type: 'string', enum: ['picker', 'confirm'], description: 'Defaults to picker. confirm lets the user approve the exact suggested file without navigating Finder/File Explorer. Never bypasses file consent.' }
+    }, ['mode']),
+    allOf: [{ if: { properties: { selectionMode: { const: 'confirm' } }, required: ['selectionMode'] }, then: { required: ['defaultPath'] } }]
+  }, { readOnly: false, timeoutMs: 120_000 }),
   tool('register_plugin_artifact', 'registerPluginArtifact', 'Register a desktop-selected plug-in assembly or package using its short-lived artifact token.', object({ artifactToken: string('Token returned by choose_plugin_artifact.'), name: string('Registration name.'), uniqueName: string('Package unique name.'), version: string('Package version.'), description: string('Description.'), isolationMode: number('1 for none or 2 for sandbox.'), solutionUniqueName: string('Optional unmanaged solution unique name.'), confirm: boolean('Confirm uploading this plug-in artifact.') }, ['artifactToken', 'confirm']), { readOnly: false, timeoutMs: 120_000 }),
   tool('update_plugin_assembly_binary', 'updatePluginAssemblyBinary', 'Replace an existing unmanaged plug-in assembly binary using a desktop-selected artifact token.', object({ assemblyId: string('Plug-in assembly GUID.'), artifactToken: string('Token returned by choose_plugin_artifact in update mode.'), description: string('Optional description.'), isolationMode: number('1 for none or 2 for sandbox.'), solutionUniqueName: string('Optional unmanaged solution unique name.'), confirm: boolean('Confirm replacing the assembly binary.') }, ['assemblyId', 'artifactToken', 'confirm']), { readOnly: false, idempotent: true, timeoutMs: 120_000 }),
   tool('list_plugin_message_filters', 'pluginMessageFilters', 'List primary/secondary table filters available for an SDK message.', object({ messageId: string('SDK message GUID.') }, ['messageId'])),
