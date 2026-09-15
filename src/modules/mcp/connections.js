@@ -2,7 +2,8 @@ import { JsonStore } from '../../lib/json-store.js';
 import { randomId, randomToken, safeEqual, sha256Hex } from '../../lib/crypto.js';
 import { mongoCollection, mongoEnabled } from '../../lib/mongo.js';
 import { AuthenticationError, NotFoundError, ValidationError } from '../../core/errors.js';
-import { normalizePolicy } from './tool-policy.js';
+import { DEVOPS_DEFAULT_POLICY, normalizePolicy } from './tool-policy.js';
+import { normalizeDevOpsGrant } from './devops-grant.js';
 
 const store = new JsonStore('mcp/connections.json', { version: 1, connections: [] });
 const MAX_ACTIVE_CONNECTIONS_PER_USER = 20;
@@ -32,6 +33,7 @@ function publicConnection(connection) {
     // What this connection may reach. Absent on older records, which is why it
     // is normalized rather than read straight through.
     toolPolicy: normalizePolicy(connection.toolPolicy),
+    ...((connection.kind || '') === 'devops' ? { devopsGrant: normalizeDevOpsGrant(connection.devopsGrant) } : {}),
     createdAt: connection.createdAt,
     lastUsedAt: connection.lastUsedAt || null,
     revokedAt: connection.revokedAt || null
@@ -105,13 +107,13 @@ export async function createMcpConnection(userId, input, endpointBase) {
   };
 }
 
-export async function listMcpConnections(userId) {
+export async function listMcpConnections(userId, { includeSpecial = false } = {}) {
   if (mongoEnabled()) {
-    const rows = await (await mongoCollection('mcp_connections')).find({ userId, kind: { $nin: ['ide', 'sharepoint', 'powerpages'] } }).sort({ createdAt: -1 }).toArray();
+    const rows = await (await mongoCollection('mcp_connections')).find({ userId, ...(!includeSpecial ? { kind: { $nin: ['ide', 'sharepoint', 'devops', 'powerpages'] } } : {}) }).sort({ createdAt: -1 }).toArray();
     return rows.map(publicConnection);
   }
   const document = await store.read();
-  return document.connections.filter(item => item.userId === userId && !['ide', 'sharepoint', 'powerpages'].includes(item.kind)).map(publicConnection);
+  return document.connections.filter(item => item.userId === userId && (includeSpecial || !['ide', 'sharepoint', 'devops', 'powerpages'].includes(item.kind))).map(publicConnection);
 }
 
 /**
@@ -234,6 +236,83 @@ export async function ensureSharePointMcpConnection(userId) {
     document.connections.push(connection);
     return { result: publicConnection(connection) };
   });
+}
+
+export function devOpsMcpConnectionSeed(userId, { now = new Date().toISOString() } = {}) {
+  // Disjoint from `activation`, for the same MongoDB reason as SharePoint's.
+  // The grant is insert-only: reactivating a connection must not wipe the
+  // organizations and projects someone chose.
+  const activation = { enabled: true, revokedAt: null };
+  const insertOnly = {
+    kind: 'devops',
+    userId,
+    tenantId: 'devops',
+    tenantKey: 'devops',
+    tenantName: 'Microsoft account',
+    environmentId: 'devops',
+    environmentKey: 'devops',
+    environmentName: 'Azure DevOps',
+    name: 'Quicker Portal Azure DevOps MCP',
+    captureMode: 'metadata',
+    devopsGrant: { organizations: {} },
+    toolPolicy: { ...DEVOPS_DEFAULT_POLICY, subjects: [...DEVOPS_DEFAULT_POLICY.subjects] },
+    keyHash: null,
+    keyPrefix: null,
+    createdAt: now,
+    lastUsedAt: null
+  };
+  return { activation, insertOnly };
+}
+
+export async function ensureDevOpsMcpConnection(userId) {
+  const { activation, insertOnly } = devOpsMcpConnectionSeed(userId);
+  if (mongoEnabled()) {
+    const updated = await (await mongoCollection('mcp_connections')).findOneAndUpdate(
+      { userId, kind: 'devops' },
+      { $set: activation, $setOnInsert: { id: randomId('adomcp'), ...insertOnly } },
+      { upsert: true, returnDocument: 'after' }
+    );
+    return publicConnection(updated);
+  }
+  return store.update(document => {
+    const existing = document.connections.find(item => item.userId === userId && item.kind === 'devops');
+    if (existing) {
+      existing.enabled = true;
+      existing.revokedAt = null;
+      return { result: publicConnection(existing) };
+    }
+    const connection = { id: randomId('adomcp'), ...insertOnly, ...activation };
+    document.connections.push(connection);
+    return { result: publicConnection(connection) };
+  });
+}
+
+/** Replaces the organizations and projects the Azure DevOps connection may reach. */
+export async function setDevOpsMcpGrant(userId, grant) {
+  const devopsGrant = normalizeDevOpsGrant(grant);
+  await ensureDevOpsMcpConnection(userId);
+  if (mongoEnabled()) {
+    const updated = await (await mongoCollection('mcp_connections')).findOneAndUpdate(
+      { userId, kind: 'devops' },
+      { $set: { devopsGrant } },
+      { returnDocument: 'after' }
+    );
+    if (!updated) throw new NotFoundError('Azure DevOps MCP connection not found.');
+    return publicConnection(updated);
+  }
+  let result;
+  await store.update(document => {
+    const connection = document.connections.find(item => item.userId === userId && item.kind === 'devops');
+    if (!connection) throw new NotFoundError('Azure DevOps MCP connection not found.');
+    connection.devopsGrant = devopsGrant;
+    result = publicConnection(connection);
+    return { result };
+  });
+  return result;
+}
+
+export function devOpsMcpConnectionEndpoint(endpointBase, userId) {
+  return `${String(endpointBase).replace(/\/+$/, '')}/devops/mcp/${encodeURIComponent(userId)}`;
 }
 
 export function sharePointMcpConnectionEndpoint(endpointBase, userId) {
@@ -376,7 +455,7 @@ export async function deleteMcpConnection(userId, connectionId) {
 
 function assertDeletableConnection(connection) {
   const kind = connection.kind || 'power-platform';
-  if (['ide', 'sharepoint', 'powerpages'].includes(kind)) {
+  if (['ide', 'sharepoint', 'devops', 'powerpages'].includes(kind)) {
     throw new ValidationError(`The ${kind} connection is provisioned automatically and cannot be deleted. Revoke it instead.`, { field: 'connectionId' });
   }
 }
@@ -446,17 +525,19 @@ export function mcpResourceMetadata(resourceUrl, serviceBaseUrl, { kind = 'power
   const isIde = resourceKind === 'ide';
   const isSharePoint = resourceKind === 'sharepoint';
   const isPowerPages = resourceKind === 'powerpages';
+  const isDevOps = resourceKind === 'devops';
   return {
     resource: resourceUrl,
-    resource_name: isIde ? 'Quicker Portal IDE MCP' : isSharePoint ? 'Quicker Portal SharePoint MCP' : isPowerPages ? 'Quicker Portal Power Pages MCP' : 'Quicker Portal Power Platform MCP',
+    resource_name: isIde ? 'Quicker Portal IDE MCP' : isDevOps ? 'Quicker Portal Azure DevOps MCP' : isSharePoint ? 'Quicker Portal SharePoint MCP' : isPowerPages ? 'Quicker Portal Power Pages MCP' : 'Quicker Portal Power Platform MCP',
     authorization_servers: [serviceBaseUrl.replace(/\/+$/, '')],
     scopes_supported: ['mcp:read', 'mcp:write', 'offline_access'],
     bearer_methods_supported: ['header'],
-    resource_documentation: `${serviceBaseUrl.replace(/\/+$/, '')}${isIde ? '/api/ide/bootstrap' : isSharePoint ? '/api/mcp/sharepoint/bootstrap' : isPowerPages ? '/api/mcp/powerpages/bootstrap' : '/api/mcp/connections'}`,
-    quicker_portal_authentication: isIde || isSharePoint || isPowerPages
+    resource_documentation: `${serviceBaseUrl.replace(/\/+$/, '')}${isIde ? '/api/ide/bootstrap' : isDevOps ? '/api/mcp/devops/bootstrap' : isSharePoint ? '/api/mcp/sharepoint/bootstrap' : isPowerPages ? '/api/mcp/powerpages/bootstrap' : '/api/mcp/connections'}`,
+    quicker_portal_authentication: isIde || isSharePoint || isDevOps || isPowerPages
       ? 'oauth-2.1-pkce-with-premium-quicker-portal-account'
       : 'oauth-2.1-pkce-or-tenant-scoped-static-bearer-key',
     ...(isSharePoint ? { sharepoint_authentication: 'connected-quicker-portal-desktop-browser-session; no customer app registration required' } : {}),
+    ...(isDevOps ? { devops_authentication: 'quicker-portal-desktop-microsoft-account; organizations and projects must be granted per connection; no app registration or personal access token' } : {}),
     ...(isPowerPages ? { power_pages_execution: 'selected-quicker-portal-desktop-environment-with-local-write-approval' } : {})
   };
 }

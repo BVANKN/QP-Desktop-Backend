@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { recordRefreshHealth } from './connection-health.js';
 import { config } from '../../config/config.js';
 import { randomId, randomToken, safeEqual, sha256Hex } from '../../lib/crypto.js';
 import {
@@ -91,20 +92,21 @@ function normalizeResource(value, serviceBaseUrl) {
   const segments = resource.pathname.split('/').filter(Boolean).map(segment => decodeURIComponent(segment));
   const ideResource = segments.length === 3 && segments[0] === 'ide' && segments[1] === 'mcp';
   const sharePointResource = segments.length === 3 && segments[0] === 'sharepoint' && segments[1] === 'mcp';
+  const devOpsResource = segments.length === 3 && segments[0] === 'devops' && segments[1] === 'mcp';
   const powerPagesResource = segments.length === 4 && segments[0] === 'powerpages' && segments[1] === 'mcp';
   const powerPlatformResource = segments.length >= 3 && segments[0] === 'mcp';
-  if (!ideResource && !sharePointResource && !powerPagesResource && !powerPlatformResource) {
+  if (!ideResource && !sharePointResource && !devOpsResource && !powerPagesResource && !powerPlatformResource) {
     throw new OAuthError('invalid_target', 'The MCP resource path is invalid.');
   }
-  const userId = cleanText(ideResource || sharePointResource || powerPagesResource ? segments[2] : segments[1], 128);
-  const tenantId = cleanText(ideResource ? 'ide' : sharePointResource ? 'sharepoint' : powerPagesResource ? `powerpages:${segments[3]}` : segments[2], 128);
+  const userId = cleanText(ideResource || sharePointResource || devOpsResource || powerPagesResource ? segments[2] : segments[1], 128);
+  const tenantId = cleanText(ideResource ? 'ide' : sharePointResource ? 'sharepoint' : devOpsResource ? 'devops' : powerPagesResource ? `powerpages:${segments[3]}` : segments[2], 128);
   if (!userId || !tenantId) throw new OAuthError('invalid_target', 'The MCP resource scope is incomplete.');
   resource.searchParams.sort();
   return {
     resource: resource.toString(),
     userId,
     tenantId,
-    kind: ideResource ? 'ide' : sharePointResource ? 'sharepoint' : powerPagesResource ? 'powerpages' : 'power-platform',
+    kind: ideResource ? 'ide' : sharePointResource ? 'sharepoint' : devOpsResource ? 'devops' : powerPagesResource ? 'powerpages' : 'power-platform',
     connectionId: cleanText(resource.searchParams.get('connection_id'), 128)
   };
 }
@@ -405,6 +407,7 @@ export async function exchangeAuthorizationCode(input) {
     revokedReason: null
   };
   const tokens = createGrantTokens(grant, grant.scopes.includes('offline_access'));
+  grant.refreshHealth = { observedSince: nowSeconds() };
   const consumed = await consumeCodeAndCreateGrant({ codeId, codeHash: sha256Hex(code), now: nowSeconds(), grant });
   if (!consumed) throw new OAuthError('invalid_grant', 'The authorization code is invalid, expired, or already used.');
   const issued = { grant, tokens };
@@ -425,8 +428,16 @@ export async function refreshOAuthToken(input, requestContext = {}) {
   // deliberately excluded: it changes between two requests of one session.
   const fingerprint = refreshClientFingerprint({ ...requestContext, includeIp: false });
   const issued = await mutateOAuthGrant(grantId, grant => {
-    if (!grant || grant.clientId !== clientId || (resource && grant.resource !== resource) || grant.revokedAt || grant.refreshExpiresAt <= nowSeconds()) {
+    if (!grant || grant.clientId !== clientId || grant.revokedAt) {
       throw new OAuthError('invalid_grant', 'The refresh token is invalid or expired.');
+    }
+    // Attribute failures only after proving possession of a known token; an
+    // invented token containing somebody else's grant ID cannot poison health.
+    const knownToken = safeEqual(grant.refreshTokenHash, presentedHash) || (grant.previousRefreshTokenHashes || []).includes(presentedHash);
+    if ((resource && grant.resource !== resource) || grant.refreshExpiresAt <= nowSeconds()) {
+      if (!knownToken) throw new OAuthError('invalid_grant', 'The refresh token is invalid or expired.');
+      recordRefreshHealth(grant, resource && grant.resource !== resource ? 'resource_mismatch' : 'refresh_expired');
+      return { value: grant, result: { rejected: true } };
     }
     if ((grant.previousRefreshTokenHashes || []).includes(presentedHash)) {
       const now = nowSeconds();
@@ -439,7 +450,8 @@ export async function refreshOAuthToken(input, requestContext = {}) {
       if (verdict === 'replay') {
         const tokens = openRefreshReplay(grant.refreshReplay?.sealed);
         if (tokens?.accessToken && tokens?.refreshToken) {
-          return { write: false, result: { grant, tokens, replayed: true } };
+          recordRefreshHealth(grant, 'retry_replayed');
+          return { value: grant, result: { grant, tokens, replayed: true } };
         }
       }
       // Inside the retry window but unable to confirm the client: refuse this
@@ -448,10 +460,12 @@ export async function refreshOAuthToken(input, requestContext = {}) {
       // are not comparable - a refused refresh costs a round trip, a revoked
       // grant costs the user their task and a fresh sign-in.
       if (verdict === 'unverified-client') {
-        return { write: false, result: { unverifiedReplay: true, grant } };
+        recordRefreshHealth(grant, 'retry_client_unverified');
+        return { value: grant, result: { unverifiedReplay: true, grant } };
       }
       grant.revokedAt = now;
       grant.revokedReason = 'refresh_token_reuse';
+      recordRefreshHealth(grant, 'refresh_token_reuse');
       return { value: grant, result: { reuseDetected: true, grant } };
     }
     if (!safeEqual(grant.refreshTokenHash, presentedHash)) throw new OAuthError('invalid_grant', 'The refresh token is invalid.');
@@ -466,8 +480,10 @@ export async function refreshOAuthToken(input, requestContext = {}) {
       sealed: sealRefreshReplay(tokens)
     } : null;
     grant.lastUsedAt = now;
+    recordRefreshHealth(grant, 'refreshed', now);
     return { value: grant, result: { grant, tokens } };
   });
+  if (issued?.rejected) throw new OAuthError('invalid_grant', 'The refresh token is invalid or expired.');
   if (issued?.unverifiedReplay) {
     await audit('mcp.oauth.refresh_replay_unverified', { grantId, clientId, userId: issued.grant.userId });
     throw new OAuthError('invalid_grant', 'This refresh token was already rotated. Retry with the newest refresh token; the session is still valid.');
@@ -572,10 +588,13 @@ export function renderAuthorizationPage(model, { error = '', notice = '' } = {})
   const { request, csrf, client, connections, retryPath } = model;
   const ide = request.tenantId === 'ide';
   const sharePoint = request.tenantId === 'sharepoint';
+  const devOps = request.tenantId === 'devops';
   const powerPages = String(request.tenantId || '').startsWith('powerpages:');
   const scopeLabels = {
     'mcp:read': ide
       ? 'Read files and project structure from workspaces you open in Quicker Portal IDE'
+      : devOps
+        ? 'Read work items, comments, repositories, pull requests, pipelines and wikis in the Azure DevOps organizations and projects you granted in Quicker Portal'
       : sharePoint
         ? 'Read sites, libraries, files, lists, columns, and list items from the SharePoint session connected on your desktop'
       : powerPages
@@ -583,6 +602,8 @@ export function renderAuthorizationPage(model, { error = '', notice = '' } = {})
       : 'Read Power Platform metadata and records through your connected desktop',
     'mcp:write': ide
       ? 'Create, edit, move, and delete workspace files and request locally approved commands'
+      : devOps
+        ? 'Request locally approved work item, comment, pull request, wiki and pipeline changes in those projects, with stale-write protection'
       : sharePoint
         ? 'Request locally approved SharePoint file and list changes with stale-write protection'
       : powerPages
@@ -597,17 +618,17 @@ export function renderAuthorizationPage(model, { error = '', notice = '' } = {})
     </label>`).join('');
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Authorize Quicker Portal MCP</title><style>
     *{box-sizing:border-box}body{margin:0;min-height:100vh;background:linear-gradient(135deg,#edf5ff,#f8f6fb 55%,#fff);color:#242424;font:14px/1.45 "Segoe UI",sans-serif;display:grid;place-items:center;padding:24px}.card{width:min(590px,100%);background:#fff;border:1px solid #ddd;border-radius:8px;box-shadow:0 16px 50px #18395d20;overflow:hidden}.head{padding:24px 28px 18px;border-bottom:1px solid #e5e5e5}.brand{display:flex;align-items:center;gap:10px;color:#0f6cbd;font-weight:600}.mark{width:30px;height:30px;border-radius:5px;background:#0f6cbd;color:#fff;display:grid;place-items:center}.head h1{font-size:24px;font-weight:600;margin:18px 0 4px}.head p{margin:0;color:#616161}.body{padding:22px 28px}.client{background:#f5f9fd;border-left:3px solid #0f6cbd;padding:12px 14px;margin-bottom:18px}.client strong,.client span{display:block}.client span{font-size:12px;color:#616161;margin-top:2px}.error,.notice{padding:10px 12px;margin-bottom:16px;border-left:3px solid}.error{background:#fde7e9;color:#a4262c;border-color:#c50f1f}.notice{background:#e5f1fb;color:#174a75;border-color:#0f6cbd}.field{display:grid;gap:6px;margin-top:13px}.field>span,.section-title{font-size:12px;font-weight:600}.field small{color:#616161}.field input{height:38px;border:1px solid #8a8886;padding:0 10px;font:inherit}.field input:focus{outline:2px solid #0f6cbd;outline-offset:-1px}.connections{display:grid;gap:7px;margin-top:8px}.connection-option{display:flex;gap:10px;align-items:center;border:1px solid #ddd;padding:10px 12px;cursor:pointer}.connection-option:has(input:checked){border-color:#0f6cbd;background:#f3f9fd}.connection-option span{display:grid}.connection-option small{color:#616161}.permissions{margin:8px 0 0;padding:0;list-style:none;display:grid;gap:7px}.permissions li{display:flex;gap:8px;color:#424242}.permissions li:before{content:'✓';color:#107c10;font-weight:700}.actions{display:flex;justify-content:flex-end;gap:8px;margin-top:22px}.actions button{min-height:36px;padding:0 16px;border:1px solid #8a8886;background:#fff;font:600 14px inherit;cursor:pointer}.actions .primary{background:#0f6cbd;border-color:#0f6cbd;color:#fff}.foot{font-size:11px;color:#616161;padding:13px 28px;background:#fafafa;border-top:1px solid #e5e5e5}@media(max-width:560px){body{padding:0}.card{border:0;border-radius:0;min-height:100vh}.head,.body{padding-left:20px;padding-right:20px}.actions{display:grid}.actions button{width:100%}}
-  </style></head><body><main class="card"><header class="head"><div class="brand"><span class="mark">QP</span>Quicker Portal</div><h1>${ide ? 'Connect your IDE workspaces' : sharePoint ? 'Connect your SharePoint workspace' : powerPages ? 'Connect your Power Pages environment' : 'Connect your Power Platform environment'}</h1><p>Sign in with your Premium Quicker Portal account and approve the access requested by ${escapeHtml(client.name)}.</p></header><section class="body">
+  </style></head><body><main class="card"><header class="head"><div class="brand"><span class="mark">QP</span>Quicker Portal</div><h1>${ide ? 'Connect your IDE workspaces' : devOps ? 'Connect your Azure DevOps projects' : sharePoint ? 'Connect your SharePoint workspace' : powerPages ? 'Connect your Power Pages environment' : 'Connect your Power Platform environment'}</h1><p>Sign in with your Premium Quicker Portal account and approve the access requested by ${escapeHtml(client.name)}.</p></header><section class="body">
     ${notice ? `<div class="notice" role="status">${escapeHtml(notice)}</div>` : ''}
     ${error ? `<div class="error" role="alert">${escapeHtml(error)}</div>` : ''}
     <div class="client"><strong>${escapeHtml(client.name)}</strong><span>${escapeHtml(request.resource)}</span></div>
     <form method="post" action="/oauth/authorize"><input type="hidden" name="requestId" value="${escapeHtml(request.id)}"><input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><input type="hidden" name="retryPath" value="${escapeHtml(retryPath)}">
       <label class="field"><span>Quicker Portal user name or email</span><input name="identifier" autocomplete="username" maxlength="254" required autofocus><small>Use your Quicker Portal account, not your Microsoft work account.</small></label>
       <label class="field"><span>Password</span><input type="password" name="password" autocomplete="current-password" maxlength="${config.password.maxLength}" required></label>
-      <div class="field"><span class="section-title">${ide ? 'IDE workspace connection' : sharePoint ? 'SharePoint desktop connection' : powerPages ? 'Power Pages environment connection' : 'Environment connection'}</span><div class="connections">${connectionChoices}</div></div>
+      <div class="field"><span class="section-title">${ide ? 'IDE workspace connection' : devOps ? 'Azure DevOps desktop connection' : sharePoint ? 'SharePoint desktop connection' : powerPages ? 'Power Pages environment connection' : 'Environment connection'}</span><div class="connections">${connectionChoices}</div></div>
       <div class="field"><span class="section-title">Permissions requested</span><ul class="permissions">${request.scopes.map(scope => `<li>${escapeHtml(scopeLabels[scope] || scope)}</li>`).join('')}</ul></div>
       <div class="actions"><button name="decision" value="deny" formnovalidate>Cancel</button><button class="primary" name="decision" value="approve">Authorize</button></div>
-    </form></section><footer class="foot">${ide ? 'Local files stay on your desktop. OAuth tokens are limited to this QP account and IDE MCP resource.' : sharePoint ? 'Microsoft credentials, cookies, and SharePoint tokens stay in the Quicker Portal desktop browser session. No customer app registration is required.' : powerPages ? 'Microsoft credentials remain in Quicker Portal. OAuth tokens are limited to Power Pages tools in this selected environment.' : 'Your Microsoft credentials remain in the Quicker Portal desktop. OAuth tokens are limited to this MCP endpoint and selected connection.'}</footer></main></body></html>`;
+    </form></section><footer class="foot">${ide ? 'Local files stay on your desktop. OAuth tokens are limited to this QP account and IDE MCP resource.' : devOps ? 'Your Microsoft credentials and Azure DevOps tokens stay in the Quicker Portal desktop. The AI client can reach only the organizations and projects you grant, and never more than your own Azure DevOps permissions.' : sharePoint ? 'Microsoft credentials, cookies, and SharePoint tokens stay in the Quicker Portal desktop browser session. No customer app registration is required.' : powerPages ? 'Microsoft credentials remain in Quicker Portal. OAuth tokens are limited to Power Pages tools in this selected environment.' : 'Your Microsoft credentials remain in the Quicker Portal desktop. OAuth tokens are limited to this MCP endpoint and selected connection.'}</footer></main></body></html>`;
 }
 
 export function oauthErrorBody(error) {

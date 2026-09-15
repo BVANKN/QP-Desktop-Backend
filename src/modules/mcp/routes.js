@@ -3,8 +3,11 @@ import { readFormBody, readJsonBody, sendHtml, sendJson, sendRedirect } from '..
 import { config } from '../../config/config.js';
 import {
   createMcpConnection,
+  devOpsMcpConnectionEndpoint,
+  ensureDevOpsMcpConnection,
   ensurePowerPagesMcpConnection,
   ensureSharePointMcpConnection,
+  setDevOpsMcpGrant,
   listMcpConnections,
   mcpConnectionEndpoint,
   mcpResourceMetadata,
@@ -17,13 +20,17 @@ import {
 import { claimDesktopJobs, completeDesktopJob, desktopStatus, heartbeatDesktop } from './broker.js';
 import { waitForSignal } from './signals.js';
 import { queryTransmissionAnalytics } from './analytics.js';
-import { CEILINGS, DEFAULT_POLICY, SUBJECTS, summarizePolicy } from './tool-policy.js';
+import { CEILINGS, DEFAULT_POLICY, DEVOPS_DEFAULT_POLICY, subjectsForResource, summarizePolicy } from './tool-policy.js';
+import { summarizeDevOpsGrant } from './devops-grant.js';
 import { MCP_TOOLS } from './tool-catalog.js';
 import { handleMcpRequest } from './protocol.js';
 import { entitlementsForUser } from '../plans/subscription-store.js';
 import { ForbiddenError } from '../../core/errors.js';
 import { consumeRateLimit } from '../../core/middleware/rate-limit.js';
 import { logger } from '../../core/logger.js';
+import { buildInfo } from '../../lib/build-info.js';
+import { listOAuthGrantRecords } from './oauth-store.js';
+import { buildConnectionHealth } from './connection-health.js';
 import {
   OAuthError,
   authorizationServerMetadata,
@@ -102,7 +109,7 @@ function safeAuthorizationRetryPath(value) {
   }
 }
 
-export function registerMcpRoutes(router) {
+export function registerMcpRoutes(router, { ideMcp } = {}) {
   router.get('/.well-known/oauth-protected-resource', ctx => {
     sendJson(ctx, 200, mcpResourceMetadata(`${endpointBase(ctx)}/mcp`, endpointBase(ctx)));
   });
@@ -114,6 +121,9 @@ export function registerMcpRoutes(router) {
   });
   router.get('/.well-known/oauth-protected-resource/ide/mcp/:userId', ctx => {
     sendJson(ctx, 200, mcpResourceMetadata(protectedResourceUrl(ctx), endpointBase(ctx), { ide: true }));
+  });
+  router.get('/.well-known/oauth-protected-resource/devops/mcp/:userId', ctx => {
+    sendJson(ctx, 200, mcpResourceMetadata(protectedResourceUrl(ctx), endpointBase(ctx), { kind: 'devops' }));
   });
   router.get('/.well-known/oauth-protected-resource/sharepoint/mcp/:userId', ctx => {
     sendJson(ctx, 200, mcpResourceMetadata(protectedResourceUrl(ctx), endpointBase(ctx), { kind: 'sharepoint' }));
@@ -233,6 +243,34 @@ export function registerMcpRoutes(router) {
   router.get('/api/mcp/tools', authenticate, requireMcpEntitlement, ctx => {
     sendJson(ctx, 200, { ok: true, tools: MCP_TOOLS });
   });
+  // Azure DevOps runs as the Microsoft account signed in to the desktop, so
+  // there is nothing tenant-side to configure: no app registration, no personal
+  // access token. What there is to decide is which organizations and projects
+  // an AI may reach, and that starts empty.
+  router.get('/api/mcp/devops/bootstrap', authenticate, requireMcpEntitlement, async ctx => {
+    const connection = await ensureDevOpsMcpConnection(ctx.auth.sub);
+    const mcpUrl = devOpsMcpConnectionEndpoint(endpointBase(ctx), ctx.auth.sub);
+    sendJson(ctx, 200, {
+      ok: true,
+      connection,
+      grant: connection.devopsGrant,
+      grantSummary: summarizeDevOpsGrant(connection.devopsGrant),
+      mcpUrl,
+      endpoint: mcpUrl,
+      oauth: { url: mcpUrl, authentication: 'oauth', discovery: 'automatic', scopes: ['mcp:read', 'mcp:write', 'offline_access'] },
+      desktop: desktopStatus(ctx.auth.sub, 'devops', 'devops'),
+      devOps: {
+        authentication: 'desktop-microsoft-account',
+        appRegistrationRequired: false,
+        personalAccessTokenRequired: false
+      }
+    });
+  });
+  router.put('/api/mcp/devops/access', authenticate, requireMcpEntitlement, async ctx => {
+    const body = await readJsonBody(ctx);
+    const connection = await setDevOpsMcpGrant(ctx.auth.sub, body?.grant ?? body);
+    sendJson(ctx, 200, { ok: true, connection, grant: connection.devopsGrant, grantSummary: summarizeDevOpsGrant(connection.devopsGrant) });
+  });
   router.get('/api/mcp/sharepoint/bootstrap', authenticate, requireMcpEntitlement, async ctx => {
     const connection = await ensureSharePointMcpConnection(ctx.auth.sub);
     const mcpUrl = sharePointMcpConnectionEndpoint(endpointBase(ctx), ctx.auth.sub);
@@ -275,6 +313,14 @@ export function registerMcpRoutes(router) {
       powerPages: { environmentId, modelDetection: 'automatic', execution: 'connected-desktop', localWriteApproval: true }
     });
   });
+  router.get('/api/mcp/connection-health', authenticate, requireMcpEntitlement, async ctx => {
+    const [connections, grants] = await Promise.all([listMcpConnections(ctx.auth.sub, { includeSpecial: true }), listOAuthGrantRecords({ userId: ctx.auth.sub })]);
+    sendJson(ctx, 200, {
+      ok: true, schemaVersion: 1, checkedAt: new Date().toISOString(), backend: buildInfo,
+      oauthPolicy: { accessTtlSeconds: config.mcp.oauth.accessTtlSeconds, refreshTtlSeconds: config.mcp.oauth.refreshTtlSeconds, refreshRetryGraceSeconds: config.mcp.oauth.refreshRetryGraceSeconds },
+      connections: buildConnectionHealth({ userId: ctx.auth.sub, connections, grants, desktopStatus, ideStatus: ideMcp?.status(ctx.auth.sub) })
+    }, { 'Cache-Control': 'no-store' });
+  });
   router.get('/api/mcp/connections', authenticate, requireMcpEntitlement, async ctx => {
     const connections = await listMcpConnections(ctx.auth.sub);
     sendJson(ctx, 200, { ok: true, connections: connections.map(connection => ({
@@ -298,17 +344,31 @@ export function registerMcpRoutes(router) {
   // What a connection may reach, and what that choice actually permits. The
   // catalog is returned with it so the desktop never has to keep its own copy
   // of the classification in step with the server's.
+  // A connection's policy only ever governs its own resource's tools, so the
+  // subjects offered and the counts shown are that resource's alone. Counting
+  // every tool in the catalog made a Power Platform connection look as though
+  // it withheld SharePoint and Azure DevOps tools it could never have used.
+  const resourceTools = resource => MCP_TOOLS.filter(tool => (tool.group || 'power-platform') === resource);
+  const policyResource = value => (['power-platform', 'devops'].includes(String(value || '')) ? String(value) : 'power-platform');
   router.get('/api/mcp/tool-policy/catalog', authenticate, requireMcpEntitlement, ctx => {
-    sendJson(ctx, 200, { ok: true, subjects: SUBJECTS, ceilings: CEILINGS, defaultPolicy: DEFAULT_POLICY, totalTools: MCP_TOOLS.length });
+    const resource = policyResource(ctx.url.searchParams.get('resource'));
+    sendJson(ctx, 200, {
+      ok: true,
+      resource,
+      subjects: subjectsForResource(resource),
+      ceilings: CEILINGS,
+      defaultPolicy: resource === 'devops' ? DEVOPS_DEFAULT_POLICY : DEFAULT_POLICY,
+      totalTools: resourceTools(resource).length
+    });
   });
   router.put('/api/mcp/connections/:connectionId/tool-policy', authenticate, requireMcpEntitlement, async ctx => {
     const body = await readJsonBody(ctx);
     const connection = await setMcpConnectionToolPolicy(ctx.auth.sub, ctx.params.connectionId, body?.policy ?? body);
-    sendJson(ctx, 200, { ok: true, connection, summary: summarizePolicy(MCP_TOOLS, connection.toolPolicy) });
+    sendJson(ctx, 200, { ok: true, connection, summary: summarizePolicy(resourceTools(policyResource(connection.kind)), connection.toolPolicy) });
   });
   router.post('/api/mcp/tool-policy/preview', authenticate, requireMcpEntitlement, async ctx => {
     const body = await readJsonBody(ctx);
-    sendJson(ctx, 200, { ok: true, summary: summarizePolicy(MCP_TOOLS, body?.policy ?? body) });
+    sendJson(ctx, 200, { ok: true, summary: summarizePolicy(resourceTools(policyResource(body?.resource)), body?.policy ?? body) });
   });
   router.delete('/api/mcp/connections/:connectionId/permanent', authenticate, requireMcpEntitlement, async ctx => {
     const deleted = await deleteMcpConnection(ctx.auth.sub, ctx.params.connectionId);
@@ -368,6 +428,9 @@ export function registerMcpRoutes(router) {
   router.delete('/mcp/:userId/:tenantId', ctx => handleMcpRequest(ctx));
   router.post('/mcp/:userId/:tenantId/:toolName', ctx => handleMcpRequest(ctx, { scopedToolName: ctx.params.toolName }));
   router.get('/mcp/:userId/:tenantId/:toolName', ctx => handleMcpRequest(ctx, { scopedToolName: ctx.params.toolName }));
+  router.post('/devops/mcp/:userId', ctx => handleMcpRequest(ctx, { resourceKind: 'devops' }));
+  router.get('/devops/mcp/:userId', ctx => handleMcpRequest(ctx, { resourceKind: 'devops' }));
+  router.delete('/devops/mcp/:userId', ctx => handleMcpRequest(ctx, { resourceKind: 'devops' }));
   router.post('/sharepoint/mcp/:userId', ctx => handleMcpRequest(ctx, { resourceKind: 'sharepoint' }));
   router.get('/sharepoint/mcp/:userId', ctx => handleMcpRequest(ctx, { resourceKind: 'sharepoint' }));
   router.delete('/sharepoint/mcp/:userId', ctx => handleMcpRequest(ctx, { resourceKind: 'sharepoint' }));

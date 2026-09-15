@@ -76,6 +76,9 @@ test('free users cannot create MCP connections', async () => {
   const result = await server.call('POST', '/api/mcp/connections', { tenantId, environmentId }, { accessToken: session.accessToken });
   assert.equal(result.status, 403);
   assert.equal(result.body.code, 'MCP_PLAN_REQUIRED');
+  const health = await server.call('GET', '/api/mcp/connection-health', undefined, { accessToken: session.accessToken });
+  assert.equal(health.status, 403);
+  assert.equal((await server.call('GET', '/api/mcp/connection-health')).status, 401);
 });
 
 test('Pro users can initialize MCP and discover the governed tool catalog', async () => {
@@ -241,6 +244,18 @@ test('ChatGPT-compatible OAuth discovery, DCR, PKCE, refresh rotation, and MCP a
   assert.equal(tokenResponse.status, 200, JSON.stringify(tokens));
   assert.match(tokens.access_token, /^qpoat\./);
   assert.match(tokens.refresh_token, /^qport\./);
+  const initialHealth = await server.call('GET', '/api/mcp/connection-health', undefined, { accessToken: session.accessToken });
+  assert.equal(initialHealth.status, 200);
+  assert.match(initialHealth.headers.get('cache-control'), /no-store/);
+  assert.ok(initialHealth.body.connections.some(row => row.sessions.some(item => item.state === 'access_valid' && item.observedSince && !item.lastSuccessAt)));
+  assert.doesNotMatch(JSON.stringify(initialHealth.body), /qpoat\.|qport\.|accessTokenHash|refreshTokenHash|sealed|clientInstanceId/);
+  const forgedRefresh = await fetch(`${server.baseUrl}/oauth/token`, {
+    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ grant_type: 'refresh_token', client_id: registered.body.client_id, refresh_token: `qport.${tokens.refresh_token.split('.')[1]}.wrong-secret`, resource })
+  });
+  assert.equal(forgedRefresh.status, 400);
+  const afterForgery = await server.call('GET', '/api/mcp/connection-health', undefined, { accessToken: session.accessToken });
+  assert.deepEqual(afterForgery.body.connections, initialHealth.body.connections, 'A forged token cannot poison another grant’s health.');
 
   const initialized = await server.call('POST', new URL(resource).pathname + new URL(resource).search, {
     jsonrpc: '2.0',
@@ -355,6 +370,8 @@ test('ChatGPT-compatible OAuth discovery, DCR, PKCE, refresh rotation, and MCP a
   const refreshed = await refreshResponse.json();
   assert.equal(refreshResponse.status, 200, JSON.stringify(refreshed));
   assert.notEqual(refreshed.refresh_token, tokens.refresh_token);
+  const refreshedHealth = await server.call('GET', '/api/mcp/connection-health', undefined, { accessToken: session.accessToken });
+  assert.ok(refreshedHealth.body.connections.some(row => row.sessions.some(item => item.lastResult === 'refreshed' && item.lastSuccessAt)));
 
   const overlappingCall = await server.call('GET', new URL(resource).pathname + new URL(resource).search, undefined,
     { headers: { Authorization: `Bearer ${tokens.access_token}` } });
@@ -413,6 +430,8 @@ test('ChatGPT-compatible OAuth discovery, DCR, PKCE, refresh rotation, and MCP a
     method: 'tools/list'
   }, { headers: { Authorization: `Bearer ${refreshed.access_token}`, 'MCP-Protocol-Version': '2025-11-25' } });
   assert.equal(stillLive.status, 200, 'an unattributable retry must not end a live session');
+  const rejectedHealth = await server.call('GET', '/api/mcp/connection-health', undefined, { accessToken: session.accessToken });
+  assert.ok(rejectedHealth.body.connections.some(row => row.sessions.some(item => item.lastResult === 'retry_client_unverified' && item.state !== 'revoked')));
 
   // Genuine reuse still revokes the whole family. Rotating a second time makes
   // the original token an old one rather than the just-rotated one, which is
@@ -446,6 +465,8 @@ test('ChatGPT-compatible OAuth discovery, DCR, PKCE, refresh rotation, and MCP a
     method: 'tools/list'
   }, { headers: { Authorization: `Bearer ${secondRotation.access_token}`, 'MCP-Protocol-Version': '2025-11-25' } });
   assert.equal(revokedAfterReuse.status, 401, 'reusing a superseded refresh token must revoke the complete grant family');
+  const revokedHealth = await server.call('GET', '/api/mcp/connection-health', undefined, { accessToken: session.accessToken });
+  assert.ok(revokedHealth.body.connections.some(row => row.sessions.some(item => item.revokedReason === 'refresh_token_reuse' && item.state === 'revoked')));
   const revokedPreviousAccess = await server.call('GET', new URL(resource).pathname + new URL(resource).search, undefined,
     { headers: { Authorization: `Bearer ${refreshed.access_token}` } });
   assert.equal(revokedPreviousAccess.status, 401, 'Revocation also rejects unexpired access tokens retained for overlapping calls.');

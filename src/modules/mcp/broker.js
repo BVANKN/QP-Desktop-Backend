@@ -5,13 +5,14 @@ import { NotFoundError, ValidationError } from '../../core/errors.js';
 import { recordTransmission } from './analytics.js';
 import { logger } from '../../core/logger.js';
 import { notifySignal, signalVersion, waitForSignal } from './signals.js';
+import { normalizeDevOpsGrant } from './devops-grant.js';
 
 const store = new JsonStore('mcp/jobs.json', { version: 1, jobs: [] });
 const desktopHeartbeats = new Map();
 const claimsInFlight = new Map();
 
 function claimedEnvelope(job, leaseToken) {
-  return { id: job.id, userId: job.userId, tenantId: job.tenantId, environmentId: job.environmentId, requestId: job.requestId, toolName: job.toolName, action: job.action, risk: job.risk, arguments: job.arguments, createdAt: job.createdAt, expiresAt: job.expiresAt, leaseToken };
+  return { id: job.id, userId: job.userId, tenantId: job.tenantId, environmentId: job.environmentId, requestId: job.requestId, toolName: job.toolName, action: job.action, risk: job.risk, arguments: job.arguments, ...(job.grant ? { grant: job.grant } : {}), createdAt: job.createdAt, expiresAt: job.expiresAt, leaseToken };
 }
 
 const JOB_RETENTION_MS = 24 * 60 * 60_000;
@@ -58,6 +59,11 @@ export async function enqueueDesktopToolCall({ connection, tool, arguments: args
     toolName: tool.name,
     action: tool.action,
     risk: tool.risk,
+    // What an Azure DevOps job may reach, taken from the connection record at
+    // the moment the call is made. It travels beside the arguments rather than
+    // inside them, so nothing a tool call supplies can widen it, and a grant
+    // narrowed a moment ago applies to the very next call.
+    ...(connection.kind === 'devops' ? { grant: normalizeDevOpsGrant(connection.devopsGrant) } : {}),
     auditContext: { id: connection.id, userId: connection.userId, tenantId: connection.tenantId, environmentId: connection.environmentId, tenantName: connection.tenantName || '', environmentName: connection.environmentName || '', captureMode: connection.captureMode || 'metadata' },
     arguments: {
       ...submittedArguments,
@@ -178,6 +184,7 @@ async function claimDesktopJobsOnce({ userId, tenantId, environmentId, clientIns
         action: secured.action,
         risk: secured.risk,
         arguments: secured.arguments,
+        ...(secured.grant ? { grant: secured.grant } : {}),
         createdAt: secured.createdAt,
         expiresAt: secured.expiresAt,
         leaseToken
@@ -230,6 +237,7 @@ async function claimDesktopJobsOnce({ userId, tenantId, environmentId, clientIns
       action: job.action,
       risk: job.risk,
       arguments: job.arguments,
+      ...(job.grant ? { grant: job.grant } : {}),
       createdAt: job.createdAt,
       expiresAt: job.expiresAt,
       leaseToken

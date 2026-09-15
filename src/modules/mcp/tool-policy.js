@@ -33,8 +33,29 @@ export const SUBJECTS = Object.freeze([
   { id: 'canvas', label: 'Canvas apps', hint: 'Canvas app source and live authoring sessions.' },
   { id: 'powerpages', label: 'Power Pages', hint: 'Power Pages sites, components and administration.' },
   { id: 'sharepoint', label: 'SharePoint', hint: 'SharePoint sites, lists and documents.' },
-  { id: 'diagnostics', label: 'Diagnostics', hint: 'Connection checks, operation polling and environment overviews. No customer data.' }
+  { id: 'diagnostics', label: 'Diagnostics', hint: 'Connection checks, operation polling and environment overviews. No customer data.' },
+
+  // Azure DevOps subjects belong to the Azure DevOps connection, which is its
+  // own MCP resource with its own tools. They are tagged so a Power Platform
+  // connection's access settings never show them, and the other way round.
+  { id: 'devops-organization', resource: 'devops', label: 'Organizations and people', hint: 'Organizations, projects, teams, and finding people to mention.' },
+  {
+    id: 'devops-work-items', resource: 'devops', label: 'Work items', hint: 'Boards, backlogs, bugs, tasks, areas and iterations.',
+    caution: 'Work items are where most project data lives - titles, descriptions, customers named in bugs.'
+  },
+  { id: 'devops-messages', resource: 'devops', label: 'Comments and mentions', hint: 'Reading and posting comments on work items and pull requests, and notifying people by mentioning them.' },
+  { id: 'devops-code', resource: 'devops', label: 'Code', hint: 'Repositories, branches, files and commits.', caution: 'Source code can contain secrets committed by mistake.' },
+  { id: 'devops-pull-requests', resource: 'devops', label: 'Pull requests', hint: 'Reading pull requests and their discussion, and opening draft pull requests.' },
+  { id: 'devops-pipelines', resource: 'devops', label: 'Pipelines', hint: 'Pipelines, runs, build results and logs, and queueing runs.', caution: 'Queueing a run can deploy or publish. Build logs can echo configuration.' },
+  { id: 'devops-wiki', resource: 'devops', label: 'Wiki', hint: 'Reading and editing project wiki pages.' },
+  { id: 'devops-test-plans', resource: 'devops', label: 'Test plans', hint: 'Test plans and their structure.' }
 ]);
+
+/** The subjects a connection of this resource can be granted. */
+export function subjectsForResource(resource = 'power-platform') {
+  const wanted = String(resource || 'power-platform');
+  return SUBJECTS.filter(subject => (subject.resource || 'power-platform') === wanted || subject.id === 'diagnostics');
+}
 
 const SUBJECT_IDS = new Set(SUBJECTS.map(subject => subject.id));
 
@@ -72,9 +93,32 @@ const SUBJECT_RULES = [
   [/table|column|relationship|choice|option_set|optionset|alternate_key|metadata/, 'schema']
 ];
 
+// Ordered, most specific first: a comment on a work item is a message before it
+// is a work item, and so is a comment on a pull request.
+const DEVOPS_SUBJECT_RULES = [
+  [/^get_devops_(operation|connection)$/, 'diagnostics'],
+  [/comment/, 'devops-messages'],
+  [/^(list_devops_(organizations|projects|teams)|search_devops_people)$/, 'devops-organization'],
+  [/work_item|_areas$|_iterations$/, 'devops-work-items'],
+  [/pull_request/, 'devops-pull-requests'],
+  [/repositories|branches|_files?$|commits/, 'devops-code'],
+  [/pipeline|build/, 'devops-pipelines'],
+  [/wiki/, 'devops-wiki'],
+  [/test_plans/, 'devops-test-plans']
+];
+
 /** The subject a tool belongs to. Never guesses: an unmatched tool is data. */
 export function subjectFor(tool) {
   const name = String(tool?.name || '');
+  if (tool?.group === 'devops') {
+    for (const [pattern, subject] of DEVOPS_SUBJECT_RULES) {
+      if (pattern.test(name)) return subject;
+    }
+    // Unclassified Azure DevOps tools fall to `data`, which no Azure DevOps
+    // subject grants - so a new tool is withheld from a restricted connection
+    // until someone decides where it belongs.
+    return 'data';
+  }
   if (tool?.group === 'sharepoint') return 'sharepoint';
   if (tool?.group === 'powerpages') return 'powerpages';
   for (const [pattern, subject] of SUBJECT_RULES) {
@@ -89,8 +133,20 @@ export function subjectFor(tool) {
 
 export const DEFAULT_POLICY = Object.freeze({
   enabled: false,
-  subjects: Object.freeze(SUBJECTS.map(subject => subject.id).filter(id => id !== 'data')),
+  subjects: Object.freeze(subjectsForResource('power-platform').map(subject => subject.id).filter(id => id !== 'data')),
   ceiling: 'write'
+});
+
+/**
+ * Where a new Azure DevOps connection starts: every subject readable, nothing
+ * writable. Combined with a grant that starts empty, an AI client connected for
+ * the first time can do nothing at all until the person grants projects, and
+ * can then only read until they raise the ceiling.
+ */
+export const DEVOPS_DEFAULT_POLICY = Object.freeze({
+  enabled: true,
+  subjects: Object.freeze(subjectsForResource('devops').map(subject => subject.id).filter(id => id !== 'diagnostics')),
+  ceiling: 'read'
 });
 
 export function normalizePolicy(input) {

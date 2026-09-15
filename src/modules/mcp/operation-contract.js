@@ -3,7 +3,8 @@
 // the same tool to read its existing job; this never dispatches desktop work.
 export const RESUMABLE_PLUGIN_TOOLS = new Set([
   'choose_plugin_artifact', 'register_plugin_artifact',
-  'update_plugin_assembly_binary', 'save_plugin_step'
+  'update_plugin_assembly_binary', 'save_plugin_step', 'save_plugin_step_image',
+  'rollback_plugin_registration', 'create_business_process_flow'
 ]);
 
 export function resumableSchema(schema) {
@@ -22,6 +23,7 @@ export function resumableSchema(schema) {
 
 export function pollToolFor(resourceKind) {
   return resourceKind === 'sharepoint' ? 'get_sharepoint_operation'
+    : resourceKind === 'devops' ? 'get_devops_operation'
     : resourceKind === 'powerpages' ? 'get_power_pages_operation' : 'get_power_platform_operation';
 }
 
@@ -36,6 +38,8 @@ export function operationContract(operation, resourceKind) {
     ? `Work is still running or awaiting desktop consent. Poll after pollAfterMs.${resumable ? ' If the poll tool is unavailable, call resumeTool with resumeArguments only.' : ''} Do not repeat the original request.`
     : hasOutput
     ? output?.canceled ? 'File selection was canceled. Stop; do not reopen the picker without a new user request.'
+      : output?.requiresVerification ? 'The write succeeded but verification is pending. Read output.nextTool with output.nextArguments; preserve the component ID and rollback token. Do not repeat the write or claim deployment is complete.'
+      : output?.requiresUserAction ? (output.message || 'User action is required. Preserve the returned plan and continuation token; do not repeat creation.')
       : operation.toolName === 'choose_plugin_artifact' ? 'File selection finished. Use output.artifactToken for registration/update; do not select the file again. Selection alone does not register the assembly.'
       : 'The operation finished. Read output, then verify the live Dataverse state before reporting success.'
     : operation.guidance || 'No successful result is available. Inspect the error or current state; do not blindly repeat registration.';

@@ -112,6 +112,18 @@ test('slow native selection can be retrieved through the same tool with no secon
     const registered = await rpc(prefix, 'tools/call', { name: 'register_plugin_artifact', arguments: { resumeOperationId: registerJob.id } });
     assert.equal(registered.body.result.structuredContent.output.assemblyId, 'registered-once');
     assert.equal(JSON.parse(fs.readFileSync(path.join(dataDir, 'mcp/jobs.json'), 'utf8')).jobs.length, 2);
+    // Destructive dispatch still requires confirmation, but resume is a
+    // read of the same already-approved operation and must not ask again.
+    const rollbackTool = MCP_TOOL_BY_NAME.get('rollback_plugin_registration');
+    const deniedRollback = await rpc(prefix, 'tools/call', { name: rollbackTool.name, arguments: { rollbackToken: 'snapshot', confirm: false } });
+    assert.ok(deniedRollback.body.error, 'unconfirmed rollback must never be dispatched');
+    const rollbackJob = await broker.enqueueDesktopToolCall({ connection, tool: rollbackTool, arguments: { rollbackToken: 'snapshot', confirm: true } });
+    const [rollbackLease] = await broker.claimDesktopJobs({ userId: session.user.id, tenantId, environmentId, clientInstanceId: 'plugin-test-desktop' });
+    await broker.completeDesktopJob({ userId: session.user.id, jobId: rollbackJob.id, leaseToken: rollbackLease.leaseToken, result: { ok: true, result: { rolledBack: true } } });
+    const resumedRollback = await rpc(`${prefix}/${rollbackTool.name}`, 'tools/call', { name: rollbackTool.name, arguments: { resumeOperationId: rollbackJob.id } });
+    assert.equal(resumedRollback.body.result.isError, false);
+    assert.equal(resumedRollback.body.result.structuredContent.output.rolledBack, true);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(dataDir, 'mcp/jobs.json'), 'utf8')).jobs.length, 3, 'resume cannot repeat rollback');
   } finally {
     await server.close();
   }

@@ -37,7 +37,7 @@ import { listIdeOAuthGrants, revokeIdeOAuthClient } from './modules/mcp/oauth.js
 export function buildRouter({ ideMcp } = {}) {
   const router = new Router();
 
-  registerMcpRoutes(router);
+  registerMcpRoutes(router, { ideMcp });
 
   // Public, read-only deployment diagnostics; no database or credential access.
   router.get('/api/version', ctx => {
