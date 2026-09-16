@@ -495,14 +495,21 @@ test('tool validation occurs before dispatch and offline desktop state is explic
 
   const offline = await mcpCall(session, connection, 'tools/call', { name: 'list_tables', arguments: {} });
   assert.equal(offline.status, 200);
-  assert.equal(offline.body.error.code, -32002);
-  assert.match(offline.body.error.message, /desktop is offline/i);
+  assert.equal(offline.body.result.isError,true);
+  assert.equal(offline.body.result.structuredContent.code,'DESKTOP_UNAVAILABLE');
+  assert.equal(offline.body.result.structuredContent.dispatched,false);
+  assert.match(offline.body.result.content[0].text,/No work was dispatched/);
 });
 
-test('tool calls traverse the desktop broker and become environment-scoped analytics', async () => {
+test('first tool call waits for the heartbeat, then traverses the environment-scoped broker', async () => {
   const session = await registerUser('mcpbridge', 'pro');
   const connection = await createConnection(session, 'detailed');
   const clientInstanceId = 'mcp-test-desktop';
+  const pendingCall = mcpCall(session, connection, 'tools/call', {
+    name: 'query_records',
+    arguments: { tableLogicalName: 'account', select: ['name', 'accountnumber'], top: 2 }
+  });
+  await new Promise(resolve => setTimeout(resolve, 40));
   const heartbeat = await server.call('POST', '/api/mcp/bridge/heartbeat', {
     userId: 'untrusted-body-cannot-override-authenticated-identity',
     tenantId,
@@ -513,10 +520,6 @@ test('tool calls traverse the desktop broker and become environment-scoped analy
   }, { accessToken: session.accessToken });
   assert.equal(heartbeat.status, 200, JSON.stringify(heartbeat.body));
 
-  const pendingCall = mcpCall(session, connection, 'tools/call', {
-    name: 'query_records',
-    arguments: { tableLogicalName: 'account', select: ['name', 'accountnumber'], top: 2 }
-  });
   await new Promise(resolve => setTimeout(resolve, 40));
   const wrongEnvironmentQuery = new URLSearchParams({ tenantId, environmentId: 'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee', clientInstanceId, limit: '1' });
   const notLeased = await server.call('GET', `/api/mcp/bridge/jobs?${wrongEnvironmentQuery}`, undefined, { accessToken: session.accessToken });

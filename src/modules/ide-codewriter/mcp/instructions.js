@@ -18,6 +18,8 @@
  *      enumerate; one that has merely been told "always re-read" does not.
  */
 
+import { POWER_PLATFORM_AUTHORING, CONTINUATION_INSTRUCTIONS } from '../../mcp/power-platform-authoring.js';
+
 export function buildServerInstructions({ mcpUrl }) {
   return `# CodeWriter
 
@@ -108,6 +110,14 @@ manifests are reproducibility source and normally belong in Git. Folders such as
 output do not. \`ensure_gitignore\` preserves every existing rule and appends only
 missing project-appropriate rules through the normal approval and undo workflow.
 
+## Power Platform authoring
+
+${POWER_PLATFORM_AUTHORING}
+
+## Long-running operations
+
+${CONTINUATION_INSTRUCTIONS}
+
 ## Recommended sequence
 
 1. \`get_workspace_overview\` — what this project is, how it is built and tested.
@@ -124,8 +134,12 @@ missing project-appropriate rules through the normal approval and undo workflow.
 Errors from this server are written to be acted on: they say what was wrong and
 what to do next. A rejected write is normally fixed by re-reading the file and
 retrying with the fresh revision, not by retrying the same call. If a tool
-reports the desktop app is disconnected, stop and tell the user — nothing you do
-will reach their files until they reopen it.`;
+reports a transient reconnect or WORKSPACE_INITIALIZING, follow its bounded
+recovery instructions, then list_workspaces and read the intended project again.
+Never silently substitute another project after an ID changes. Do not infer an
+OAuth problem or ask to reconnect solely from pending/running status. Stop for
+an intentional MCP pause/offline mode, denied approval, or a persistent confirmed
+disconnect, and give the exact cause. Never replay a write whose outcome is unknown.`;
 }
 
 /**
@@ -141,7 +155,8 @@ export const REMINDERS = {
     if (!verification || !verification.enforced) {
       return [
         'Reminder: re-read any file you intend to edit again before writing to it.',
-        'If this change scaffolds a project or adds dependencies, run ensure_gitignore before installing or building.'
+        'If this change scaffolds a project or adds dependencies, run ensure_gitignore before installing or building.',
+        'PCF/plug-ins must preserve the PAC-generated project structure; a generic React or .NET app is not an equivalent scaffold.'
       ].join('\n');
     }
     const commands = verification.commands.filter((c) => c.required).map((c) => c.label);

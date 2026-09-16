@@ -148,7 +148,7 @@ export function createIdeMcpSubsystem() {
         agents: hub.agentsForUser(userId).length,
         workspaces: registry.listForUser(userId).map(workspace => workspace.toJSON()),
         sessions: userSessions.map(session => session.toJSON()),
-        transportSessions: userSessions.length,
+        transportSessions: mcpRouter.stats().detail.filter(session => session.userId === userId).length,
         uptimeSeconds: Math.floor(process.uptime())
       };
     },

@@ -42,7 +42,7 @@ const CHANGE_LOG_LIMIT = 500;
  * version of a file the user has been editing for ten minutes.
  */
 export class Workspace {
-  constructor({ id, userId, agentId, name, rootPath, kind }) {
+  constructor({ id, userId, agentId, localId, singleFile, name, rootPath, kind }) {
     this.id = id;
     this.userId = userId;
     this.agentId = agentId;
@@ -50,6 +50,10 @@ export class Workspace {
     this.rootPath = rootPath;
     /** @type {'folder' | 'file'} */
     this.kind = kind;
+    this.localId = localId || null;
+    this.singleFile = kind === 'file' ? singleFile || name : null;
+    this.closed = false;
+    this.dirtyPaths = new Set();
 
     /** @type {Map<string, FileEntry>} */
     this.files = new Map();
@@ -87,10 +91,12 @@ export class Workspace {
     if (reset) {
       this.files.clear();
       this.indexedBytes = 0;
+      this.indexComplete = false;
     }
     for (const raw of entries) {
       const entry = normaliseEntry(raw);
       if (!entry) continue;
+      entry.dirty = entry.dirty || this.dirtyPaths.has(entry.path);
       const previous = this.files.get(entry.path);
       if (previous) this.indexedBytes -= previous.size;
       this.files.set(entry.path, entry);
@@ -224,6 +230,9 @@ export class Workspace {
       name: this.name,
       rootPath: this.rootPath,
       kind: this.kind,
+      localId: this.localId,
+      singleFile: this.singleFile,
+      selected: Boolean(this.selected),
       connected: this.connected,
       fileCount: this.files.size,
       indexedBytes: this.indexedBytes,
@@ -297,7 +306,7 @@ export class WorkspaceRegistry {
    * Registers a newly opened workspace.
    * @returns {Workspace}
    */
-  register({ userId, agentId, name, rootPath, kind }) {
+  register({ userId, agentId, localId, singleFile, name, rootPath, kind }) {
     if (kind !== 'folder' && kind !== 'file') {
       throw badRequest(`Workspace kind must be "folder" or "file", got "${kind}".`);
     }
@@ -305,12 +314,17 @@ export class WorkspaceRegistry {
     // Re-opening the same path from the same agent reuses the id, so an MCP
     // client that has been told a workspace id does not lose it on a refresh.
     const existing = [...this.workspaces.values()].find(
-      (w) => w.userId === userId && w.rootPath === rootPath && w.agentId === agentId
+      (w) => w.userId === userId && w.agentId === agentId &&
+        (localId ? w.localId === localId : !w.localId && w.rootPath === rootPath && w.kind === kind && (kind !== 'file' || w.singleFile === (singleFile || name)))
     );
     if (existing) {
+      if (existing.rootPath !== rootPath || existing.kind !== kind || (kind === 'file' && existing.singleFile !== (singleFile || name))) {
+        throw badRequest('A desktop workspace identity cannot be rebound to another project or file.');
+      }
       existing.files.clear();
       existing.indexedBytes = 0;
       existing.indexComplete = false;
+      this.contentCache.dropWorkspace(existing.id);
       log.info(`Re-indexing existing workspace ${existing.id} (${rootPath})`);
       return existing;
     }
@@ -319,6 +333,8 @@ export class WorkspaceRegistry {
       id: prefixedId('ws'),
       userId,
       agentId,
+      localId,
+      singleFile,
       name,
       rootPath,
       kind
@@ -332,6 +348,8 @@ export class WorkspaceRegistry {
   close(workspaceId) {
     const workspace = this.workspaces.get(workspaceId);
     if (!workspace) return false;
+    workspace.closed = true;
+    workspace.agentId = null;
     this.workspaces.delete(workspaceId);
     this.contentCache.dropWorkspace(workspaceId);
     log.info(`Closed workspace ${workspaceId} (${workspace.rootPath})`);

@@ -23,8 +23,8 @@ export function extendedTools({ tool, object, string, boolean, array, number }) 
   return [
     ...[['power_platform', 'power-platform'], ['sharepoint', 'sharepoint'], ['power_pages', 'powerpages']].map(([label, group]) => tool(
       `get_${label}_operation`, 'mcpOperationStatus',
-      'Check the operation ID returned by a pending tool call. Poll after pollAfterMs; never repeat the original mutation to obtain a result. An unknown outcome requires a current-state read before any retry.',
-      object({ operationId: { ...string('Operation ID returned by this same MCP connection.'), minLength: 1, maxLength: 128 } }, ['operationId']),
+      'Wait for the existing operation. Continue polling in this task until terminal; pending is not a reason to stop or ask the user to continue. Use waitMs=20000 for a bounded wait. Never repeat the original mutation. Respect approval/cancellation; inspect unknown outcomes before retrying.',
+      object({ operationId: { ...string('Operation ID returned by this same MCP connection.'), minLength: 1, maxLength: 128 }, waitMs: { type:'integer',minimum:0,maximum:20000,description:'Wait for completion, up to 20 seconds. Use 20000 to avoid repeated immediate polls.' } }, ['operationId']),
       { group, execution: 'server', idempotent: true }
     )),
     tool('discover_dataverse_api', 'mcpDataverseApiCatalog', 'Search actual action/function/entity-set signatures from the selected environment CSDL. Returns bounded pages, not the entire metadata document. Includes custom APIs; permissions still apply. Metadata is cached for five minutes per account/environment; refresh after schema changes.', object({

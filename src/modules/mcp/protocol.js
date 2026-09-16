@@ -7,7 +7,8 @@ import { mcpAuthFailure } from './auth-failure.js';
 import { MCP_TOOLS, MCP_TOOL_BY_NAME, publicTool } from './tool-catalog.js';
 import { toolAllowed } from './tool-policy.js';
 import { RESUMABLE_PLUGIN_TOOLS, operationContract, pollToolFor } from './operation-contract.js';
-import { currentDesktopEnvironment, desktopStatus, enqueueDesktopToolCall, waitForDesktopJob, getDesktopOperation } from './broker.js';
+import { currentDesktopEnvironment, waitForDesktopReady, enqueueDesktopToolCall, waitForDesktopJob, getDesktopOperation } from './broker.js';
+import { POWER_PLATFORM_AUTHORING, CONTINUATION_INSTRUCTIONS } from './power-platform-authoring.js';
 import { recordTransmission } from './analytics.js';
 import { entitlementsForUser } from '../plans/subscription-store.js';
 import { logger } from '../../core/logger.js';
@@ -141,7 +142,8 @@ async function executeTool(ctx, connection, tool, args, id, resourceKind = 'powe
       const operation = await getDesktopOperation({
         userId: connection.userId, connectionId: connection.id,
         operationId: resume ? args.resumeOperationId : args.operationId,
-        expectedToolName: resume ? tool.name : scopedToolName && scopedToolName !== tool.name ? scopedToolName : undefined
+        expectedToolName: resume ? tool.name : scopedToolName && scopedToolName !== tool.name ? scopedToolName : undefined,
+        waitMs: resume ? 0 : args.waitMs
       });
       const result = resultContent(operationContract(operation, resourceKind));
       result.isError = ['failed', 'expired'].includes(operation.status) || operation.result?.ok === false;
@@ -151,7 +153,7 @@ async function executeTool(ctx, connection, tool, args, id, resourceKind = 'powe
     }
   }
 
-  const desktop = desktopStatus(connection.userId, connection.tenantId, connection.environmentId);
+  const desktop = await waitForDesktopReady(connection.userId, connection.tenantId, connection.environmentId);
   if (tool.execution === 'server') {
     const startedAt = Date.now();
     const requestId = `mcp_${randomUUID()}`;
@@ -190,7 +192,10 @@ async function executeTool(ctx, connection, tool, args, id, resourceKind = 'powe
   }
   if (!desktop.connected) {
     const mismatch = desktop.environmentMatches === false;
-    return jsonRpcError(id, -32002, 'Quicker Portal desktop is offline.', {
+    return { jsonrpc:'2.0',id,result:{ isError:true,content:[{type:'text',text:mismatch
+      ? 'The desktop is on a different environment. Select the configured environment before continuing.'
+      : 'The desktop did not reconnect within the recovery window. No work was dispatched. Check its connection health; this is not an OAuth rejection.'}],structuredContent:{
+      code:mismatch ? 'DESKTOP_ENVIRONMENT_MISMATCH' : 'DESKTOP_UNAVAILABLE', dispatched:false,
       remediation: resourceKind === 'devops'
         ? 'Open Quicker Portal, sign in with this Premium account and with the Microsoft account that belongs to the Azure DevOps organization, then keep the desktop app running while the AI works.'
         : resourceKind === 'sharepoint'
@@ -204,7 +209,7 @@ async function executeTool(ctx, connection, tool, args, id, resourceKind = 'powe
       environmentMatches: desktop.environmentMatches,
       desktopEnvironmentId: desktop.environmentId || null,
       desktopEnvironmentName: desktop.environmentName || null
-    });
+    } } };
   }
 
   const startedAt = Date.now();
@@ -337,7 +342,7 @@ export async function handleMcpRequest(ctx, { scopedToolName, resourceKind = 'po
         : isPowerPages
         ? { name: 'Quicker Portal Power Pages MCP', version: '1.0.0', description: 'Builds and operates Power Pages sites through the selected Quicker Portal desktop environment.' }
         : { name: 'Quicker Portal Power Platform MCP', version: '1.0.0', description: 'Executes Power Platform operations through the user-connected Quicker Portal desktop.' },
-      instructions: "A result with pending=true is accepted work, not success or failure. Poll the returned pollTool with operationId after pollAfterMs; do not resubmit the original mutation. If the status is outcome_unknown, inspect current state before proposing any retry. Report per-item failures and partial/truncated inventory explicitly. For plug-ins use the Dataverse connector, not only IDE build tools: inspect assemblies/types/steps/images, choose or confirm the built artifact once, register or update, save exact steps and images, then read back and verify solution membership. If writeSucceeded=true with verification=pending, read get_plugin_registration by the returned ID; do not repeat the write. Report required user action and exact errors instead of generic manual-registration advice. " + (isDevOps
+      instructions: CONTINUATION_INSTRUCTIONS + '\n' + (!isDevOps && !isSharePoint && !isPowerPages ? POWER_PLATFORM_AUTHORING + '\n' : '') + "A result with pending=true is accepted work, not success or failure. Poll the returned pollTool with operationId after pollAfterMs; do not resubmit the original mutation. If the status is outcome_unknown, inspect current state before proposing any retry. Report per-item failures and partial/truncated inventory explicitly. For plug-ins use the Dataverse connector, not only IDE build tools: inspect assemblies/types/steps/images, choose or confirm the built artifact once, register or update, save exact steps and images, then read back and verify solution membership. If writeSucceeded=true with verification=pending, read get_plugin_registration by the returned ID; do not repeat the write. Report required user action and exact errors instead of generic manual-registration advice. " + (isDevOps
         ? 'You act as the Microsoft account signed in to the user\'s Quicker Portal desktop, inside the Azure DevOps organizations and projects the user granted to this connection - never more than that account can already do, and never outside the grant. Never ask for personal access tokens, passwords, client IDs or app registrations. Start with list_devops_organizations and list_devops_projects: they return only what is granted, so work only with those. If a call is refused as not granted, tell the user which organization or project to grant in Quicker Portal under Azure DevOps MCP; do not look for a way around it. To answer questions about work, prefer query_devops_work_items with structured filters over hand-written WIQL. Before updating a work item, read it with get_devops_work_item and pass its rev as expectedRevision; if the update reports a conflict, read it again rather than forcing. Azure DevOps has no direct messages: to message someone, find them with search_devops_people and add a comment with add_devops_work_item_comment or add_devops_pull_request_comment, passing them in mentions so they are actually notified. Plain @name text notifies nobody. Pull requests you create are drafts unless the user asks otherwise. Running a pipeline has real effects - deployments, packages, spent minutes - so confirm the exact pipeline and branch with the user first, and never try to pass pipeline variables. Deleting a work item moves it to the recycle bin and requires confirm=true after explicit user approval. Report partial or truncated results, and items withheld outside the grant, explicitly.'
         : isSharePoint
         ? 'The connected Quicker Portal desktop browser session is the only authoritative SharePoint identity and site. Never ask for tenant IDs, client IDs, client secrets, app registrations, Microsoft passwords, cookies, or access tokens. Start with get_sharepoint_connection. Discover current site, drive, list, column, and item IDs before acting. Before changing a list, column, file, or list item, call its exact get/read tool immediately first and use the returned ETag or revision when available; stale writes must be re-read, never forced. For text files use patch_sharepoint_file with the exact SHA-256 revision and targeted anchors returned by read_sharepoint_file; never ask the user to paste the complete file and never reconstruct unchanged content from memory. For list items, send only changed fields using internal column names and the current ETag. Create a list first, then create each requested column with create_sharepoint_column; do not invent internal names or unsupported column types. Column type and internal name are immutable after creation, so create a replacement only after explaining the migration impact. Follow paging links for large libraries and lists. Keep reads bounded. Preview the exact target in your response and use delete tools only after explicit user confirmation. If the desktop or SharePoint session is disconnected, explain that the user must reconnect it in Quicker Portal rather than requesting credentials.'

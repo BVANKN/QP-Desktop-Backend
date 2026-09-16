@@ -30,6 +30,21 @@ const FIRST_WAIT_MS = 25_000;
 /** How often we report progress while a command runs. */
 const PROGRESS_INTERVAL_MS = 2000;
 
+function runningCommand(runId, fields) {
+  return { ...fields,runId,status:'running',pending:true,partial:true,continuePolling:true,
+    pollTool:'get_command_result',pollArguments:{runId,waitSec:30},requiresChatReply:false,
+    guidance:'Continue get_command_result within this task until terminal. Do not ask the user to say continue or resubmit run_command. Honor required approvals, cancellation and client limits.' };
+}
+
+function rememberResult(ctx, record, result) {
+  const cache = ctx.completedRuns ||= new Map();
+  const now = Date.now();
+  for (const [id,item] of cache) if (now-item.at>10*60_000) cache.delete(id);
+  cache.set(record.runId,{workspaceId:record.workspaceId,result,at:now});
+  while(cache.size>128) cache.delete(cache.keys().next().value);
+  return result;
+}
+
 /**
  * Commands that can materialise downloaded packages, caches or build output.
  *
@@ -62,7 +77,7 @@ function needsGitignorePreflight(argv) {
     const moduleName = moduleIndex >= 0 ? String(argv[moduleIndex + 1] || '').toLowerCase() : '';
     return ['pip', 'venv', 'build', 'pytest', 'tox'].includes(moduleName);
   }
-  if (program === 'pac') return ['pcf', 'solution', 'package'].includes(subcommand);
+  if (program === 'pac') return ['pcf', 'plugin', 'solution', 'package'].includes(subcommand);
   return false;
 }
 
@@ -124,6 +139,7 @@ export function registerCommandTools(server, ctx) {
       description:
         'Runs a command in the workspace root on the user\'s machine and returns its exit code, stdout ' +
         'and stderr.\n\n' +
+        'PCF/PLUGIN CREATION: first read get_power_platform_project_guide. Use pac pcf init or pac plugin init; never substitute a generic React/web/console project. Preserve generated files and signing identity.\n\n' +
         'TOOL DISCOVERY: this is the user\'s machine, not an isolated environment. Use get_environment ' +
         'and installed tool paths. A PATH, runtime, timeout, or permission error does not justify reinstalling. ' +
         'For project-local .NET tools inspect the manifest and use dotnet tool run. Diagnose first.\n\n' +
@@ -143,7 +159,7 @@ export function registerCommandTools(server, ctx) {
         'LONG COMMANDS: if a command is still running when the response budget runs out, this returns a ' +
         'runId with STATUS "still running" instead of blocking. That is NOT a failure and the command is ' +
         'NOT cancelled — call get_command_result with the runId to collect the result. A real npm install ' +
-        'or a cold build normally needs one or two polls.',
+        'or a cold build normally needs several polls. Keep polling in this task until terminal; do not ask the user to say continue merely because another poll is needed.',
       inputSchema: {
         workspaceId: z.string().optional().describe(WORKSPACE_ID_DESCRIPTION),
         commandId: z
@@ -267,8 +283,8 @@ export function registerCommandTools(server, ctx) {
       let streamedOut = '';
       let streamedErr = '';
       const detach = ctx.hub.attachCommandStream(agent, runId, (frame) => {
-        if (frame.stream === 'stderr') streamedErr += frame.chunk || '';
-        else streamedOut += frame.chunk || '';
+        if (frame.stream === 'stderr') streamedErr = (streamedErr+(frame.chunk || '')).slice(-MAX_OUTPUT_CHARS);
+        else streamedOut = (streamedOut+(frame.chunk || '')).slice(-MAX_OUTPUT_CHARS);
       });
 
       ctx.activeRuns.set(runId, { workspaceId: workspace.id, commandId, startedAt: started, agentId: agent.id });
@@ -329,6 +345,8 @@ export function registerCommandTools(server, ctx) {
         record.settled = settled;
         record.finishedAt = Date.now();
         detach();
+        const expiry = setTimeout(() => { if (ctx.activeRuns.get(runId) === record) ctx.activeRuns.delete(runId); },10*60_000);
+        expiry.unref?.();
       });
 
       // Deliberately well short of the client's budget rather than right up
@@ -367,7 +385,7 @@ export function registerCommandTools(server, ctx) {
             `Call get_command_result with runId "${runId}" to wait for the rest. Long installs and`,
             'cold builds routinely need two or three polls; that is normal, not a failure.'
           ].join('\n'),
-          { runId, status: 'running', partial: true, stdout: streamedOut, stderr: streamedErr, command: argv.join(' ') }
+          runningCommand(runId,{stdout:streamedOut,stderr:streamedErr,command:argv.join(' ')})
         );
       }
 
@@ -382,7 +400,7 @@ export function registerCommandTools(server, ctx) {
         ].join('\n\n');
         return fail(
           `The command did not complete: ${err.message}\n\n${partial}\n\n` +
-            'It has been cancelled. If this command is long-running by nature (a dev server, a watcher), ' +
+            'Cancellation was requested. If the bridge disconnected, inspect prior effects before repeating the command. If this command is long-running by nature (a dev server, a watcher), ' +
             'it is not something to run here — pick the project\'s one-shot build or test command instead.',
           { runId, error: err.code }
         );
@@ -472,9 +490,9 @@ export function registerCommandTools(server, ctx) {
 
       const result = `${header}\n\n${body}${trailer}`;
 
-      return passed
+      return rememberResult(ctx,record,passed
         ? ok(result, { runId, exitCode, durationMs, passed, stdout, stderr, command: argv.join(' '), verification })
-        : fail(result, { runId, exitCode, durationMs, passed, stdout, stderr, command: argv.join(' '), verification });
+        : fail(result, { runId, exitCode, durationMs, passed, stdout, stderr, command: argv.join(' '), verification }));
     })
   );
 
@@ -508,6 +526,9 @@ export function registerCommandTools(server, ctx) {
         toolName: 'finish_task',
         summary: args.summary
       });
+
+      const running = [...ctx.activeRuns.entries()].filter(([,run]) => run.workspaceId === workspace.id && !run.settled && !run.finishedAt).map(([runId]) => ({runId,pollTool:'get_command_result',pollArguments:{runId,waitSec:30}}));
+      if (running.length) return fail('This task is not complete: commands are still running. Collect their existing results and finish verification; do not restart them or ask the user to continue just for polling.',{error:'COMMANDS_STILL_RUNNING',pending:true,runs:running});
 
       const evaluation = workspace.verification.evaluate();
 
@@ -607,7 +628,7 @@ export function registerCommandTools(server, ctx) {
         'run_command returns early when a command is still going, because no MCP client waits more than ' +
         'about a minute and a real `npm install` or cold build takes longer. That is not a failure — the ' +
         'command is still running on the user\'s machine. Call this with the runId to collect the result.\n\n' +
-        'If it reports "still running" again, call it again. Several polls for a large install is normal.',
+        'If it reports "still running" again, call it again within this task until terminal. Several polls for a large install is normal; do not ask the user to say continue. Keep approval and cancellation boundaries intact.',
       inputSchema: {
         runId: z.string().describe('The runId returned by run_command.'),
         waitSec: z
@@ -624,10 +645,15 @@ export function registerCommandTools(server, ctx) {
 
       const record = ctx.activeRuns.get(args.runId);
       if (!record) {
+        const saved = ctx.completedRuns?.get(args.runId);
+        if (saved && Date.now()-saved.at<=10*60_000) {
+          ctx.registry.get(saved.workspaceId,userId);
+          return saved.result;
+        }
         return fail(
           `No command with runId "${args.runId}" is tracked.\n\n` +
             'Either it finished and its result was already returned, or the backend restarted. ' +
-            'Run the command again if you still need its output.'
+            'Inspect the workspace, build artifacts and recent changes before deciding whether to rerun. Do not automatically repeat a command that may have changed local or remote state.'
         );
       }
 
@@ -664,7 +690,7 @@ export function registerCommandTools(server, ctx) {
             '',
             'Still executing. Call get_command_result again with the same runId.'
           ].join('\n'),
-          { runId: record.runId, status: 'running', partial: true, stdout: soFar, stderr: errSoFar, command: record.argv.join(' ') }
+          runningCommand(record.runId,{stdout:soFar,stderr:errSoFar,command:record.argv.join(' ')})
         );
       }
 
@@ -680,6 +706,7 @@ export function registerCommandTools(server, ctx) {
       }
 
       const response = outcome.value;
+      if (response.error) return rememberResult(ctx,record,fail(response.message || 'The desktop refused or could not start the command.',{runId:record.runId,error:response.error,status:'failed',pending:false}));
       const passed = response.exitCode === 0 && !response.timedOut;
 
       if (record.detected) {
@@ -711,9 +738,9 @@ export function registerCommandTools(server, ctx) {
       const trailer = passed ? summariseRemaining(verification) : `\n\n${REMINDERS.afterFailedCommand()}`;
       const text = `${header}\n\n${body}${trailer}`;
 
-      return passed
+      return rememberResult(ctx,record,passed
         ? ok(text, { runId: record.runId, exitCode: response.exitCode, passed, stdout: response.stdout || soFar, stderr: response.stderr || errSoFar, command: record.argv.join(' '), verification })
-        : fail(text, { runId: record.runId, exitCode: response.exitCode, passed, stdout: response.stdout || soFar, stderr: response.stderr || errSoFar, command: record.argv.join(' '), verification });
+        : fail(text, { runId: record.runId, exitCode: response.exitCode, passed, stdout: response.stdout || soFar, stderr: response.stderr || errSoFar, command: record.argv.join(' '), verification }));
     })
   );
 

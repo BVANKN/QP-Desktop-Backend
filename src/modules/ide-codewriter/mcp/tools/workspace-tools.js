@@ -11,6 +11,7 @@ import {
 import { assertScope, READ_SCOPE } from '../guards.js';
 import { buildGlobMatcher, normalizeRelDir } from '../../util/paths.js';
 import { formatBytes } from '../../util/text.js';
+import { POWER_PLATFORM_AUTHORING } from '../../../mcp/power-platform-authoring.js';
 
 /**
  * Orientation tools: what is open, what kind of project it is, and what is in
@@ -18,6 +19,27 @@ import { formatBytes } from '../../util/text.js';
  * is why their descriptions say so explicitly.
  */
 export function registerWorkspaceTools(server, ctx) {
+  server.registerTool('get_power_platform_project_guide', {
+    title:'PCF and Dataverse plug-in project contract',
+    description:'Read before creating a PCF or Dataverse plug-in. Returns the required PAC scaffold, supported framework, build/signing requirements and verification sequence. Does not create or change files. Use existing run_command and approval workflows to execute the scaffold.',
+    inputSchema:{}, annotations:{readOnlyHint:true,openWorldHint:false}
+  },toolHandler('get_power_platform_project_guide',async (_args,extra) => {
+    assertScope(extra.authInfo,READ_SCOPE);
+    callContext(ctx,extra).session.countCall('get_power_platform_project_guide');
+    return ok(POWER_PLATFORM_AUTHORING,{contractVersion:'2026-09-16',guidance:POWER_PLATFORM_AUTHORING});
+  }));
+  server.registerTool('reindex_workspace', {
+    title:'Refresh project files and build checks',
+    description:'Refresh the live file index and detected build/test commands after PAC scaffolding, installing dependencies, or changing project manifests. Does not build or deploy. Respects IDE offline mode and sharing limits.',
+    inputSchema:{workspaceId:z.string().optional().describe(WORKSPACE_ID_DESCRIPTION)},
+    annotations:{readOnlyHint:true,openWorldHint:false}
+  },toolHandler('reindex_workspace',async (args,extra) => {
+    assertScope(extra.authInfo,READ_SCOPE);
+    const {workspace,agent}=await resolveTarget(ctx,extra,args.workspaceId,{toolName:'reindex_workspace',requireLiveAgent:true});
+    const result=await agent.request('reindex',{workspaceId:workspace.id});
+    if (result.assessment?.eligible === false) return fail('Project remains local, but MCP sharing was paused by the workspace safety check. Review .gitignore in the IDE before reconnecting.',{code:'WORKSPACE_OFFLINE',assessment:result.assessment});
+    return ok('Project index refreshed. Read get_workspace_overview and run its current required checks.',{...result,workspaceId:workspace.id,verification:workspace.verification.toJSON()});
+  }));
   server.registerTool(
     'list_workspaces',
     {
@@ -37,7 +59,7 @@ export function registerWorkspaceTools(server, ctx) {
         assertScope(extra.authInfo, READ_SCOPE);
         session.countCall('list_workspaces');
 
-        const workspaces = ctx.registry.listForUser(userId);
+        const workspaces = ctx.hub.waitForWorkspaces ? await ctx.hub.waitForWorkspaces(userId) : ctx.registry.listForUser(userId);
         if (!workspaces.length) {
           return ok(
             'No workspaces are open.\n\n' +
@@ -56,6 +78,7 @@ export function registerWorkspaceTools(server, ctx) {
             `  name:      ${w.name}`,
             `  path:      ${w.rootPath}`,
             `  kind:      ${w.kind}`,
+            `  IDE view:  ${w.selected ? 'selected' : 'open in background'} (selection does not retarget existing work)`,
             `  files:     ${w.fileCount} indexed (${formatBytes(w.indexedBytes)})`,
             `  git:       ${w.git.isRepo ? `branch ${w.git.branch || 'unknown'}` : 'not a git repository'}`,
             `  checks:    ${checks}`
@@ -173,6 +196,7 @@ export function registerWorkspaceTools(server, ctx) {
         );
       }
 
+      sections.push('', 'For PCF or Dataverse plug-in work, call get_power_platform_project_guide before scaffolding. Use PAC-generated projects, not generic React or .NET application templates.');
       return ok(sections.join('\n'), workspace.toJSON());
     })
   );

@@ -65,11 +65,20 @@ export function callContext(ctx, extra) {
  */
 export async function resolveTarget(ctx, extra, workspaceId, { toolName, summary, requireLiveAgent } = {}) {
   const call = callContext(ctx, extra);
-  const workspace = ctx.registry.resolve(call.userId, workspaceId);
+  const workspace = ctx.hub.resolveWorkspace
+    ? await ctx.hub.resolveWorkspace(call.userId,workspaceId)
+    : ctx.registry.resolve(call.userId, workspaceId);
   const agent = ctx.hub.agentForWorkspace(workspace);
 
   if (requireLiveAgent) {
-    const rttMs = await agent.ensureAlive();
+    let rttMs;
+    try { rttMs = await agent.ensureAlive(); }
+    catch (error) {
+      error.details = { ...error.details,dispatched:false,
+        ...(['UNAVAILABLE','AGENT_TIMEOUT'].includes(error.code) ? { retryable:true,nextTool:'list_workspaces',nextArguments:{},guidance:'The operation was not dispatched. Recheck the connection and re-read the same intended project before retrying; never substitute another workspace.' } : {}) };
+      throw error;
+    }
+    if (workspace.closed) throw new AppError('WORKSPACE_GONE', 'The project was closed while this request was waiting. List workspaces again; do not retarget this operation automatically.', { status:409 });
     log.debug(`Agent liveness confirmed in ${rttMs}ms before ${toolName}`);
   }
 
@@ -99,6 +108,8 @@ export async function resolveTarget(ctx, extra, workspaceId, { toolName, summary
  * @returns {Promise<Array<{ path: string, content?: string, revision?: string, error?: string, message?: string, binary?: boolean, dirty?: boolean }>>}
  */
 export async function fetchFiles(ctx, { workspace, agent, paths }) {
+  const assertOpen = () => { if (workspace.closed) throw new AppError('WORKSPACE_GONE', 'The project was closed during this read. Its cached files have been discarded.', { status:409 }); };
+  assertOpen();
   const results = [];
   const misses = [];
   let resultBytes = 0;
@@ -140,6 +151,7 @@ export async function fetchFiles(ctx, { workspace, agent, paths }) {
     if (chunk.length) chunks.push(chunk);
     for (const requestedPaths of chunks) {
     const response = await readChunk(agent, workspace, requestedPaths, maxBytes);
+    assertOpen();
 
     for (const file of response.files || []) {
       if (file.error) {

@@ -436,7 +436,21 @@ export function heartbeatDesktop({ userId, tenantId, environmentId, environmentN
     lastSeenAt: new Date().toISOString()
   };
   desktopHeartbeats.set(key, snapshot);
+  notifySignal(`heartbeat:${userId}:${String(tenantId).toLowerCase()}`);
   return snapshot;
+}
+
+// A just-started/reconnecting desktop may not have sent its first heartbeat yet.
+// Wait BEFORE enqueuing work; never replay an accepted action to recover liveness.
+export async function waitForDesktopReady(userId, tenantId, environmentId = '', timeoutMs = 12_000) {
+  const key = `heartbeat:${userId}:${String(tenantId).toLowerCase()}`;
+  const deadline = Date.now() + Math.max(0,Math.min(12_000,timeoutMs));
+  while (true) {
+    const version = signalVersion(key);
+    const desktop = desktopStatus(userId,tenantId,environmentId);
+    if (desktop.connected || desktop.environmentMatches === false || Date.now() >= deadline) return desktop;
+    await waitForSignal(key,version,Math.min(1000,deadline-Date.now()));
+  }
 }
 
 /**
@@ -533,11 +547,18 @@ function pendingDesktopOperation(job) {
   throw error;
 }
 
-export async function getDesktopOperation({ userId, connectionId, operationId, expectedToolName }) {
-  const job = mongoEnabled()
-    ? await (await mongoCollection('mcp_jobs')).findOne({ id: operationId, userId, connectionId })
-    : (await store.read()).jobs.find(item => item.id === operationId && item.userId === userId && item.connectionId === connectionId);
-  if (!job || (expectedToolName && job.toolName !== expectedToolName)) throw new NotFoundError('This operation is not available to this MCP connection and tool.');
+export async function getDesktopOperation({ userId, connectionId, operationId, expectedToolName, waitMs = 0 }) {
+  const deadline = Date.now() + Math.max(0,Math.min(20_000,Number(waitMs) || 0));
+  let job;
+  while (true) {
+    const version = signalVersion(`job:${operationId}`);
+    job = mongoEnabled()
+      ? await (await mongoCollection('mcp_jobs')).findOne({ id: operationId, userId, connectionId })
+      : (await store.read()).jobs.find(item => item.id === operationId && item.userId === userId && item.connectionId === connectionId);
+    if (!job || (expectedToolName && job.toolName !== expectedToolName)) throw new NotFoundError('This operation is not available to this MCP connection and tool.');
+    if (!['queued','leased'].includes(job.status) || Date.parse(job.expiresAt) <= Date.now() || Date.now() >= deadline) break;
+    await waitForSignal(`job:${operationId}`,version,Math.min(1000,deadline-Date.now()));
+  }
   const overdue = Date.parse(job.expiresAt) <= Date.now();
   const status = overdue && job.status === 'leased' ? 'outcome_unknown' : overdue && job.status === 'queued' ? 'expired' : job.status;
   return {

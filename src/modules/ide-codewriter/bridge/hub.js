@@ -27,7 +27,7 @@ const HEARTBEAT_MS = 15_000;
  * the backend cannot touch a path the agent will not touch for it, and the
  * agent revalidates every path against the workspace root it actually opened.
  */
-class AgentConnection {
+export class AgentConnection {
   /**
    * @param {import('ws').WebSocket} socket
    * @param {object} context
@@ -116,9 +116,13 @@ class AgentConnection {
   async ensureAlive() {
     const started = Date.now();
     try {
-      await this.request('ping', {}, { timeoutMs: config.bridgePingTimeoutMs });
+      const response = await this.request('ping', {}, { timeoutMs: config.bridgePingTimeoutMs });
+      if (response?.remoteEnabled === false) throw new AppError('MCP_PAUSED','The IDE is intentionally offline or MCP sharing is paused. Ask the user to enable it in IDE settings; do not reconnect OAuth or bypass their choice.',{status:409});
       return Date.now() - started;
     } catch (err) {
+      // A responding desktop can reject work for policy/approval reasons.
+      // That proves transport liveness; killing it causes a false reconnect.
+      if (!['AGENT_TIMEOUT','UNAVAILABLE'].includes(err.code)) throw err;
       log.warn(`Agent ${this.id} failed a liveness check; terminating the socket`, err.message);
       try {
         this.socket.terminate();
@@ -362,7 +366,8 @@ export class AgentHub {
           agentId: agent.id,
           name: frame.name,
           rootPath: frame.rootPath,
-          kind: frame.kind
+          kind: frame.kind,
+          localId: frame.localId, singleFile: frame.singleFile
         });
         // Echo the assigned id back so the agent can label subsequent frames.
         agent.emit('workspace-registered', {
@@ -370,6 +375,16 @@ export class AgentHub {
           workspaceId: workspace.id,
           rootPath: workspace.rootPath
         });
+        if (frame.selected === true) for (const item of this.registry.workspaces.values()) {
+          if (item.agentId === agent.id) item.selected = item === workspace;
+        }
+        return;
+      }
+
+      case AGENT_EVENT.WORKSPACE_SELECTED: {
+        const selected = this.#workspaceFor(agent, frame.workspaceId);
+        if (!selected) return;
+        for (const item of this.registry.workspaces.values()) if (item.agentId === agent.id) item.selected = item === selected;
         return;
       }
 
@@ -413,6 +428,7 @@ export class AgentHub {
         if (!workspace) return;
         // Mark which files have unsaved editor buffers, so reads can say so.
         const dirty = new Set(frame.dirtyPaths || []);
+        workspace.dirtyPaths = dirty;
         for (const [path, entry] of workspace.files) {
           entry.dirty = dirty.has(path);
         }
@@ -420,7 +436,8 @@ export class AgentHub {
       }
 
       case AGENT_EVENT.WORKSPACE_CLOSED: {
-        if (frame.workspaceId) this.registry.close(frame.workspaceId);
+        const workspace = this.#workspaceFor(agent, frame.workspaceId);
+        if (workspace) this.registry.close(workspace.id);
         return;
       }
 
@@ -468,6 +485,29 @@ export class AgentHub {
       );
     }
     return agent;
+  }
+
+  /** Briefly allow a connected desktop to announce its initial workspace. */
+  async waitForWorkspaces(userId, timeoutMs = 8000) {
+    const deadline = Date.now()+timeoutMs;
+    while (!this.registry.listForUser(userId).length && this.agentsForUser(userId).length && Date.now()<deadline) {
+      await new Promise(resolve => setTimeout(resolve,50));
+    }
+    return this.registry.listForUser(userId);
+  }
+
+  async resolveWorkspace(userId, workspaceId, timeoutMs = 8000) {
+    const deadline = Date.now()+timeoutMs;
+    if (!workspaceId) await this.waitForWorkspaces(userId,timeoutMs);
+    // Resolve once. A close/reconnect must never move a queued mutation to a
+    // new workspace merely because the new one is now selected.
+    const workspace = this.registry.resolve(userId,workspaceId);
+    while (!workspace.indexComplete && !workspace.closed && Date.now()<deadline) {
+      await new Promise(resolve => setTimeout(resolve,50));
+    }
+    if (workspace.closed) throw new AppError('WORKSPACE_GONE','The project was closed or disconnected during preparation. List workspaces and re-read the intended project; do not replay a write.',{status:409,details:{dispatched:false}});
+    if (!workspace.indexComplete) throw new AppError('WORKSPACE_INITIALIZING','The project is still sharing its initial file index. Retry get_workspace_overview for this same workspace before editing; no operation was dispatched.',{status:503,details:{dispatched:false,retryable:true,retryAfterMs:1000,nextTool:'get_workspace_overview',nextArguments:{workspaceId:workspace.id}}});
+    return workspace;
   }
 
   /** Every agent connected for a user. */

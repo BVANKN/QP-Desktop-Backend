@@ -97,7 +97,7 @@ test('desktop completion returns the acknowledged operation result', async () =>
   const begin = source.indexOf('async function executeTool('), end = source.indexOf('export async function handleMcpRequest', begin);
   const context = {
     RESUMABLE_PLUGIN_TOOLS, operationContract,
-    validateSchema, desktopStatus: () => ({ connected: true }), randomUUID,
+    validateSchema, waitForDesktopReady: async () => ({ connected: true }), randomUUID,
     config: { mcp: { desktopTimeoutMs: 120_000 } },
     enqueueDesktopToolCall: async () => ({ id: 'job' }), waitForDesktopJob: async () => ({ result: { ok: true, result: { id: 'created-once' } } }),
     recordTransmission: async () => { throw new Error('analytics disk full'); }, logger: { warn() {} }, resultContent: value => ({ structuredContent: value, isError: false })

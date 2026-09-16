@@ -35,7 +35,7 @@ export function devOpsTools({ tool, object, string, boolean, array, number }) {
   return [
     tool('get_devops_operation', 'mcpOperationStatus',
       'Check the operation ID returned by a pending Azure DevOps tool call. Poll after pollAfterMs; never repeat the original change to obtain a result. An unknown outcome requires reading current state before any retry.',
-      object({ operationId: { ...string('Operation ID returned by this same MCP connection.'), minLength: 1, maxLength: 128 } }, ['operationId']),
+      object({ operationId: { ...string('Operation ID returned by this same MCP connection.'), minLength: 1, maxLength: 128 }, waitMs:{ type:'integer',minimum:0,maximum:20000,description:'Wait up to 20 seconds for the existing operation. Continue until terminal without repeating the original change.' } }, ['operationId']),
       { ...read, execution: 'server', idempotent: true }),
     tool('get_devops_connection', 'mcpConnectionStatus',
       'Check whether the Quicker Portal desktop is online for Azure DevOps and which organizations and projects this connection has been granted. Call this first. If nothing is granted, ask the user to grant organizations or projects in Quicker Portal under Azure DevOps MCP.',

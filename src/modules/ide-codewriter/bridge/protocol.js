@@ -47,6 +47,7 @@ export const AGENT_METHOD = {
 /** Events the agent sends up to the backend. */
 export const AGENT_EVENT = {
   WORKSPACE_OPENED: 'workspace-opened',
+  WORKSPACE_SELECTED: 'workspace-selected',
   MANIFEST_CHUNK: 'manifest-chunk',
   INDEX_COMPLETE: 'index-complete',
   FILE_CHANGED: 'file-changed',

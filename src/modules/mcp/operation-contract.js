@@ -35,7 +35,7 @@ export function operationContract(operation, resourceKind) {
   const hasOutput = operation.status === 'completed' && !operation.resultPurged && !failed && raw != null;
   const output = hasOutput ? (raw?.ok === true && Object.hasOwn(raw, 'result') ? raw.result : raw) : undefined;
   const guidance = pending
-    ? `Work is still running or awaiting desktop consent. Poll after pollAfterMs.${resumable ? ' If the poll tool is unavailable, call resumeTool with resumeArguments only.' : ''} Do not repeat the original request.`
+    ? `Work is still running or awaiting desktop consent. Continue polling in this task using pollTool and pollArguments until terminal; do not end the task or ask the user to say continue merely because polling is needed.${resumable ? ' If the poll tool is unavailable, call resumeTool with resumeArguments only after pollAfterMs.' : ''} Keep approval prompts intact and honor user cancellation. Do not repeat the original request.`
     : hasOutput
     ? output?.canceled ? 'File selection was canceled. Stop; do not reopen the picker without a new user request.'
       : output?.requiresVerification ? 'The write succeeded but verification is pending. Read output.nextTool with output.nextArguments; preserve the component ID and rollback token. Do not repeat the write or claim deployment is complete.'
@@ -47,7 +47,8 @@ export function operationContract(operation, resourceKind) {
     ...operation,
     pending,
     pollTool: pollToolFor(resourceKind),
-    pollArguments: { operationId: operation.operationId },
+    pollArguments: { operationId: operation.operationId,waitMs:20000 },
+    ...(pending ? { continuePolling:true, nextAction:'poll', requiresChatReply:false } : {}),
     ...(resumable ? { resumeTool: operation.toolName, resumeArguments: { resumeOperationId: operation.operationId } } : {}),
     ...(hasOutput ? { output } : {}),
     guidance

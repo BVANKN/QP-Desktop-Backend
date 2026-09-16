@@ -207,8 +207,13 @@ test('QP OAuth, bridge, workspace reads, and writes work end to end', async () =
     params: { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'QP IDE test', version: '1' } }
   });
   assert.equal(initialized.response.status, 200, JSON.stringify(initialized.body));
+  assert.match(initialized.body.result.instructions,/pac pcf init/);
+  assert.match(initialized.body.result.instructions,/pac plugin init/);
+  assert.match(initialized.body.result.instructions,/Do not ask\s+the user to say/);
   const mcpSessionId = initialized.response.headers.get('mcp-session-id');
   assert.ok(mcpSessionId);
+  const connectedStatus = await server.call('GET', '/api/ide/status', undefined, { accessToken:session.accessToken });
+  assert.equal(connectedStatus.body.transportSessions, 1, 'an initialized MCP client counts as connected even before its first tool call');
 
   const tools = await mcpCall(bootstrap.mcpUrl, tokens.access_token, {
     jsonrpc: '2.0', id: 20, method: 'tools/list', params: {}
@@ -217,6 +222,7 @@ test('QP OAuth, bridge, workspace reads, and writes work end to end', async () =
     tools.body?.result?.tools?.some(tool => tool.name === 'ensure_gitignore'),
     'the MCP client needs a named dependency-hygiene tool'
   );
+  for (const name of ['get_power_platform_project_guide','reindex_workspace']) assert.ok(tools.body.result.tools.some(tool=>tool.name===name),name);
 
   const refreshForm = new URLSearchParams({
     grant_type: 'refresh_token',
