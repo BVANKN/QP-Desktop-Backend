@@ -8,7 +8,7 @@ import {
   boundedInt,
   WORKSPACE_ID_DESCRIPTION
 } from './shared.js';
-import { assertScope, READ_SCOPE } from '../guards.js';
+import { assertScope, READ_SCOPE, WRITE_SCOPE } from '../guards.js';
 import { buildGlobMatcher, normalizeRelDir } from '../../util/paths.js';
 import { formatBytes } from '../../util/text.js';
 import { POWER_PLATFORM_AUTHORING } from '../../../mcp/power-platform-authoring.js';
@@ -19,6 +19,32 @@ import { POWER_PLATFORM_AUTHORING } from '../../../mcp/power-platform-authoring.
  * is why their descriptions say so explicitly.
  */
 export function registerWorkspaceTools(server, ctx) {
+  server.registerTool('inspect_plugin_signing', {
+    title: 'Inspect local plug-in signing key',
+    description: 'Check an explicit .csproj and its private .snk key locally, including gitignored keys. Returns existence, validity and public key token only, NEVER private key contents. A private/ignored key can still be used by the compiler. Does not change files. Computed or inherited MSBuild settings may require build-time evaluation.',
+    inputSchema: { workspaceId: z.string().optional().describe(WORKSPACE_ID_DESCRIPTION), projectPath: z.string().describe('Workspace-relative .csproj path. Do not guess when several projects exist.') },
+    annotations: { readOnlyHint: true, openWorldHint: false }
+  }, toolHandler('inspect_plugin_signing', async (args, extra) => {
+    assertScope(extra.authInfo, READ_SCOPE);
+    const { workspace, agent } = await resolveTarget(ctx, extra, args.workspaceId, { toolName: 'inspect_plugin_signing', requireLiveAgent: true });
+    requireCapability(agent, 'pluginSigning');
+    const result = await agent.request('pluginSigning', { workspaceId: workspace.id, projectPath: args.projectPath, mode: 'inspect' });
+    return ok(JSON.stringify(result), result);
+  }));
+  server.registerTool('configure_plugin_signing', {
+    title: 'Configure local-only plug-in signing',
+    description: 'With explicit desktop approval, configure a .csproj to use a local private .snk key without exposing its contents. mode use takes an existing workspace-relative keyPath (may be gitignored); select opens the native picker at the project folder; generate creates a new 2048-bit key ONLY for an explicitly new assembly, never overwriting a key. Existing registered assemblies must reuse the original key. Approval is bounded; cancellation/timeout does not mean a dropped MCP connection. Inspect before retrying an uncertain outcome, then rebuild Release and verify the actual DLL. Does not build or deploy.',
+    inputSchema: { workspaceId: z.string().optional().describe(WORKSPACE_ID_DESCRIPTION), projectPath: z.string(), mode: z.enum(['use', 'select', 'generate']), keyPath: z.string().optional().describe('Workspace-relative .snk path, required for use/generate. Never pass key bytes.'), newAssembly: z.boolean().optional().describe('Set true for generation only when the user confirmed this is a NEW assembly, not an update.') },
+    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false }
+  }, toolHandler('configure_plugin_signing', async (args, extra) => {
+    assertScope(extra.authInfo, WRITE_SCOPE);
+    const { workspace, agent } = await resolveTarget(ctx, extra, args.workspaceId, { toolName: 'configure_plugin_signing', requireLiveAgent: true });
+    requireCapability(agent, 'pluginSigning');
+    const result = await agent.request('pluginSigning', { workspaceId: workspace.id, projectPath: args.projectPath, mode: args.mode, keyPath: args.keyPath, newAssembly: args.newAssembly }, { timeoutMs: 50_000 });
+    if (result.changed || result.keyCreated || result.changedPaths?.length) workspace.verification.markDirty(result.changedPaths?.length ? result.changedPaths : [args.projectPath]);
+    if (result.error) return fail(result.message, result);
+    return ok(result.cancelled ? 'Signing was cancelled; do not retry without user direction.' : result.next, { ...result, verification: workspace.verification.toJSON() });
+  }));
   server.registerTool('get_power_platform_project_guide', {
     title:'PCF and Dataverse plug-in project contract',
     description:'Read before creating a PCF or Dataverse plug-in. Returns the required PAC scaffold, supported framework, build/signing requirements and verification sequence. Does not create or change files. Use existing run_command and approval workflows to execute the scaffold.',

@@ -5,6 +5,27 @@ When asked to create a PCF control or Dataverse plug-in, use Microsoft's project
 scaffold, not a generic web app, console app, or an invented directory layout.
 First inspect the existing workspace and get_environment. Preserve existing
 projects; never initialize over user files or replace an existing signing key.
+BEFORE CREATING: gather missing user choices in ONE short numbered list of
+questions, with suggested defaults and plain-language options. Reuse answers
+already in the conversation or verified project/solution metadata; do not ask
+again, invent answers, or scatter questions across multiple turns. Wait for the
+answers before scaffolding or installing. If the user explicitly delegates a
+choice, state your choice briefly and proceed. This intake applies to NEW projects,
+not routine edits/builds of existing projects. After intake, resume the existing
+scaffold, approval, build, registration and polling workflow unchanged.
+For PCF ask only missing essentials: field (one value) or dataset (records/grid);
+control name and namespace; solution publisher prefix (distinct from namespace);
+React/platform libraries or standard HTML; intended behavior and input/output
+properties; destination folder and build-only versus deploy, including target
+environment/solution if deploying. Offer a concise proposed design rather than
+requiring the user to know manifest internals. Publisher prefix can be deferred
+for build-only work; never invent a deployment prefix or environment.
+For plug-ins ask only missing essentials: assembly/class name and namespace;
+table, message and filtering columns; desired behavior, stage/sync versus async
+and images (recommend appropriate choices); destination project/folder; new
+assembly versus updating an existing registered assembly and reusing its key;
+build-only versus register, including target environment/solution if registering.
+Do not ask users to upload/paste private signing keys or passwords into chat.
 Run ensure_gitignore (mode project, apply missing rules with consent) before
 installing/building. Use run_command with argv arrays and a workspace-relative
 cwd; obtain required command approvals. Missing PAC is a tooling prerequisite,
@@ -40,6 +61,15 @@ can require Windows/Visual Studio MSBuild; do not claim it builds on macOS just
 because a .NET SDK is installed. Restore and build Release, read all errors, and
 verify the actual artifact. Build success is not deployment success: register or
 update with the Dataverse tools, create exact steps/images, and read them back.
+For .snk signing use inspect_plugin_signing then configure_plugin_signing in IDE
+MCP, when available. Keys remain local even when gitignored; MCP read exclusion
+does NOT mean the compiler cannot use them. Never remove ignore rules or read,
+print, base64-encode, upload or recreate private keys through file/command tools.
+Use an existing key for updates; generate only for an explicitly new assembly
+with desktop approval. If tools are unavailable, direct the user to IDE signing
+controls, not to exposing the key. CS7027 file-not-found requires locating the
+key/correcting its project-relative path; NU1900 is a separate vulnerability-feed
+warning, not permission to disable auditing. Rebuild and verify the actual DLL.
 
 After scaffolding/install/build, reindex_workspace and read the actual generated
 project and diagnostics. Never report completion while a command is running,

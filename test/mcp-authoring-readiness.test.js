@@ -81,6 +81,32 @@ test('IDE advertises real PAC guidance and reindexing, not generic app templates
     assert.ok(buildServerInstructions({mcpUrl:'https://example.test'}).includes(fragment),fragment);
   }
   assert.match(guide.content[0].text,/not a standalone\s+React application/);
+  for (const fragment of ['ONE short numbered list', 'field (one value) or dataset', 'publisher prefix (distinct from namespace)', 'not routine edits/builds', 'Reuse answers', 'inspect_plugin_signing', 'configure_plugin_signing']) assert.ok(guide.content[0].text.includes(fragment), fragment);
+  assert.ok(handlers.has('inspect_plugin_signing')); assert.ok(handlers.has('configure_plugin_signing'));
+});
+
+test('signing tools require scope, desktop capability and preserve the exact project target', async t => {
+  const {ctx,workspace,hub} = fixture(t), handlers = new Map(), calls = [];
+  workspace.finishIndex();
+  const desktop = { capabilities: new Set(['pluginSigning']), info: {}, emit() {}, async ensureAlive() {}, async request(method, params) {
+    calls.push({method, params});
+    return params.mode === 'inspect' ? { projectPath: params.projectPath, configured: {status:'local-private', publicKeyToken:'public-only'} }
+      : { changed: true, changedPaths:[params.projectPath], path:params.projectPath, next:'Rebuild and verify the DLL.' };
+  } };
+  hub.agents.set('desktop', desktop);
+  registerWorkspaceTools({registerTool:(name,_schema,handler)=>handlers.set(name,handler)},ctx);
+  const args = {workspaceId:workspace.id,projectPath:'Plugin Test/Test.csproj',mode:'use',keyPath:'Plugin Test/Testing.snk'};
+  const readOnly = {...extra, authInfo:{...extra.authInfo,scopes:['workspace:read']}};
+  assert.equal((await handlers.get('configure_plugin_signing')(args,readOnly)).isError,true);
+  assert.equal(calls.length,0);
+  assert.equal((await handlers.get('inspect_plugin_signing')(args,readOnly)).structuredContent.configured.status,'local-private');
+  assert.equal((await handlers.get('configure_plugin_signing')(args,extra)).structuredContent.changed,true);
+  assert.equal(calls.at(-1).method,'pluginSigning');
+  assert.equal(calls.at(-1).params.projectPath,args.projectPath); assert.equal(calls.at(-1).params.keyPath,args.keyPath);
+  assert.ok(workspace.verification.toJSON().dirtyPaths.includes(args.projectPath));
+  desktop.capabilities.clear();
+  const stale = await handlers.get('configure_plugin_signing')(args,extra);
+  assert.equal(stale.structuredContent.error,'DESKTOP_APP_OUT_OF_DATE');
 });
 
 test('completed command polls are replayable without rerunning or crossing workspace ownership',async t=>{
