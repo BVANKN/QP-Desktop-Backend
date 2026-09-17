@@ -5,7 +5,16 @@ import { PayloadTooLargeError, ValidationError } from '../errors.js';
 import { config } from '../../config/config.js';
 
 export function createContext(req, res) {
-  const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+  let url;
+  try {
+    const host = String(req.headers.host || 'localhost');
+    if (/[\s@/\\?#]/.test(host)) throw new Error('Invalid Host header');
+    const origin = new URL(`http://${host}`);
+    url = new URL(req.url, origin);
+    if (url.origin !== origin.origin || url.username || url.password) throw new Error('Invalid request target');
+  } catch {
+    throw new ValidationError('Invalid HTTP Host header or request target.');
+  }
   return {
     req,
     res,
@@ -34,7 +43,7 @@ function resolveClientIp(req) {
 export async function readJsonBody(ctx, maxBytes = config.maxBodyBytes) {
   const { req } = ctx;
   const contentType = String(req.headers['content-type'] || '');
-  if (!contentType.toLowerCase().startsWith('application/json')) {
+  if (contentType.split(';')[0].trim().toLowerCase() !== 'application/json') {
     throw new ValidationError('Content-Type must be application/json.');
   }
   const declaredLength = Number.parseInt(req.headers['content-length'] || '0', 10);

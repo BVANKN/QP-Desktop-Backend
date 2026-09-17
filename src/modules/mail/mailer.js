@@ -4,6 +4,7 @@
 //   smtp   — built-in minimal SMTP client (see smtp-client.js).
 import fsp from 'node:fs/promises';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { config } from '../../config/config.js';
 import { logger } from '../../core/logger.js';
 import { sendSmtpMail } from './smtp-client.js';
@@ -12,7 +13,7 @@ const outboxDir = path.join(config.dataDir, 'outbox');
 
 async function sendToOutbox({ to, subject, text }) {
   await fsp.mkdir(outboxDir, { recursive: true, mode: 0o700 });
-  const fileName = `${Date.now()}-${to.replace(/[^a-z0-9@.]/gi, '_')}.eml`;
+  const fileName = `${Date.now()}-${randomUUID()}-${to.replace(/[^a-z0-9@.]/gi, '_')}.eml`;
   const message = [
     `From: ${config.mail.from}`,
     `To: <${to}>`,
@@ -23,7 +24,7 @@ async function sendToOutbox({ to, subject, text }) {
     '',
     text
   ].join('\r\n');
-  await fsp.writeFile(path.join(outboxDir, fileName), message, { encoding: 'utf8', mode: 0o600 });
+  await fsp.writeFile(path.join(outboxDir, fileName), message, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
   logger.info('Mail written to outbox', { to, subject, file: fileName });
 }
 

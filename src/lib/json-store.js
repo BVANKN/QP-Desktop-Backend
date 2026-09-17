@@ -1,64 +1,90 @@
-// Crash-safe JSON persistence.
+// Single-process JSON persistence with isolated committed snapshots.
 //
-// Every store is a single JSON document on disk. Writes go to a temp file,
-// fsync, then atomic rename — a crash mid-write can never corrupt the live
-// file. A per-store promise chain serializes mutations so concurrent request
-// handlers cannot interleave read-modify-write cycles.
+// Writes fsync a temporary file before replacing the live document by rename.
+// A per-file promise chain serializes this process's read-modify-write cycles.
+// This is not a cross-process database transaction or a guarantee against all
+// filesystem/power-loss scenarios; multi-worker production uses MongoDB.
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { config } from '../config/config.js';
 
-const mutations = new Map(); // storePath -> tail of promise chain
+const mutations = new Map(); // filePath -> settled tail of promise chain
+const documents = new Map(); // one committed snapshot per file, across instances
 
 function withStoreLock(storePath, task) {
-  const tail = mutations.get(storePath) || Promise.resolve();
-  const next = tail.then(task, task);
-  // Keep the chain alive but don't let one failure poison later writers.
-  mutations.set(storePath, next.catch(() => {}));
+  const previous = mutations.get(storePath) || Promise.resolve();
+  const next = previous.then(task, task);
+  const tail = next.then(() => {}, () => {});
+  mutations.set(storePath, tail);
+  void tail.then(() => {
+    if (mutations.get(storePath) === tail) mutations.delete(storePath);
+  });
   return next;
 }
 
 async function atomicWrite(filePath, data) {
   await fsp.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
-  const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-  const handle = await fsp.open(tempPath, 'w', 0o600);
+  const tempPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
+  let handle;
   try {
+    handle = await fsp.open(tempPath, 'wx', 0o600);
     await handle.writeFile(data, 'utf8');
     await handle.sync();
-  } finally {
     await handle.close();
+    handle = null;
+    await fsp.rename(tempPath, filePath);
+  } finally {
+    // Do not replace the original write/rename error with a cleanup error.
+    if (handle) await handle.close().catch(() => {});
+    await fsp.unlink(tempPath).catch(() => {});
   }
-  await fsp.rename(tempPath, filePath);
 }
 
 export class JsonStore {
   constructor(relativePath, defaultValue) {
-    this.filePath = path.join(config.dataDir, relativePath);
-    this.defaultValue = defaultValue;
-    this.cache = undefined;
+    this.filePath = path.resolve(config.dataDir, relativePath);
+    this.defaultValue = structuredClone(defaultValue);
+    if (!documents.has(this.filePath)) documents.set(this.filePath, { loaded: false, value: undefined, loading: null });
+    this.state = documents.get(this.filePath);
   }
 
   async read() {
-    if (this.cache !== undefined) return this.cache;
-    try {
-      this.cache = JSON.parse(await fsp.readFile(this.filePath, 'utf8'));
-    } catch (error) {
-      if (error.code !== 'ENOENT') throw error;
-      this.cache = structuredClone(this.defaultValue);
+    const state = this.state;
+    if (!state.loaded) {
+      state.loading ||= (async () => {
+        let value;
+        try {
+          value = JSON.parse(await fsp.readFile(this.filePath, 'utf8'));
+        } catch (error) {
+          if (error.code !== 'ENOENT') throw error;
+          value = structuredClone(this.defaultValue);
+        }
+        state.value = value;
+        state.loaded = true;
+      })().finally(() => { state.loading = null; });
+      await state.loading;
     }
-    return this.cache;
+    // Readers may edit their snapshot, but persistence always requires update().
+    return structuredClone(state.value);
   }
 
-  // mutator receives the current document and returns { value?, result? }.
-  // The (possibly replaced) document is persisted atomically before resolve.
+  // Mutators edit a private working document. Publish only AFTER atomic rename
+  // succeeds, so exceptions never leak uncommitted edits into other requests.
   async update(mutator) {
     return withStoreLock(this.filePath, async () => {
       const current = await this.read();
       const outcome = await mutator(current) || {};
       const nextValue = 'value' in outcome ? outcome.value : current;
-      await atomicWrite(this.filePath, JSON.stringify(nextValue, null, 2));
-      this.cache = nextValue;
+      const serialized = JSON.stringify(nextValue, null, 2);
+      if (serialized === undefined) throw new TypeError('A JSON store document must be JSON-serializable.');
+      // Canonicalize before writing, and keep retained mutator/result references
+      // separate from the committed cache. Memory and a restart now agree.
+      const committed = JSON.parse(serialized);
+      await atomicWrite(this.filePath, serialized);
+      this.state.value = committed;
+      this.state.loaded = true;
       return outcome.result;
     });
   }

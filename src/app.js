@@ -19,7 +19,16 @@ export function createApp() {
   const router = buildRouter({ ideMcp });
 
   const server = http.createServer(async (req, res) => {
-    const ctx = createContext(req, res);
+    let ctx;
+    try {
+      ctx = createContext(req, res);
+    } catch {
+      // An async node:http listener must not reject before its error boundary.
+      // Host/request-target parsing can fail before a context exists.
+      applySecurityHeaders(res);
+      sendJson({ res }, 400, { ok: false, code: 'VALIDATION_ERROR', error: 'Invalid HTTP Host header or request target.' });
+      return;
+    }
     res.setHeader('X-Request-Id', ctx.requestId);
     applySecurityHeaders(res);
     // Streamable HTTP is handled by the MCP SDK/Express adapter because it
@@ -79,6 +88,7 @@ export function createApp() {
     pruneExpiredSessions().catch(error => logger.error('Session prune failed', { error: error.message }));
   }, 60 * 60_000);
   pruneTimer.unref?.();
+  server.once('close', () => clearInterval(pruneTimer));
 
   return server;
 }

@@ -1,3 +1,5 @@
+import { ValidationError } from '../errors.js';
+
 // Tiny exact-match + parameterized router over node:http. Routes register as
 // (method, pathPattern, ...handlers). Patterns support `:param` segments.
 export class Router {
@@ -27,7 +29,7 @@ export class Router {
       for (let index = 0; index < route.segments.length; index += 1) {
         const routeSegment = route.segments[index];
         if (routeSegment.startsWith(':')) {
-          params[routeSegment.slice(1)] = decodeURIComponent(pathSegments[index]);
+          params[routeSegment.slice(1)] = pathSegments[index];
         } else if (routeSegment !== pathSegments[index]) {
           matched = false;
           break;
@@ -35,7 +37,14 @@ export class Router {
       }
       if (!matched) continue;
       pathExists = true;
-      if (route.method === method.toUpperCase()) return { handlers: route.handlers, params };
+      if (route.method === method.toUpperCase()) {
+        try {
+          for (const name of Object.keys(params)) params[name] = decodeURIComponent(params[name]);
+        } catch {
+          throw new ValidationError('A route parameter contains invalid URL encoding.');
+        }
+        return { handlers: route.handlers, params };
+      }
     }
     return pathExists ? { methodMismatch: true } : null;
   }

@@ -11,9 +11,10 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "test": "node --test \"test/*.test.js\"",
+    "test": "npm run check:reliability && node --test \"test/*.test.js\"",
     "check": "node --check server.js && node ./scripts/check-syntax.mjs",
-    "migrate:mongo": "node ./scripts/migrate-json-to-mongo.mjs"
+    "migrate:mongo": "node ./scripts/migrate-json-to-mongo.mjs",
+    "check:reliability": "node ./scripts/check-reliability.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
