@@ -18,6 +18,7 @@ const requiredTools = {
   add_solution_component: ['addSolutionComponent', 'write'],
   remove_solution_component: ['removeSolutionComponent', 'destructive'],
   create_form: ['createComponentDesigner', 'write'],
+  edit_form_layout: ['patchComponentDesigner', 'write'],
   create_view: ['createComponentDesigner', 'write'],
   create_web_resource: ['createWebResource', 'write'],
   update_web_resource: ['updateWebResource', 'write'],
@@ -57,6 +58,19 @@ test('model-app creation uses a GUID icon input and source changes are revision 
   }), []);
 });
 
+test('model-app table add exposes exact-table and navigation controls', () => {
+  const tool = MCP_TOOL_BY_NAME.get('add_model_app_table');
+  assert.ok(tool);
+  assert.equal(tool.action, 'addMdaTableComponent');
+  assert.ok(tool.inputSchema.properties.addToNavigation);
+  assert.ok(tool.inputSchema.properties.navigationTitle);
+  assert.ok(tool.inputSchema.properties.publish);
+  assert.equal(tool.inputSchema.properties.rootComponentBehavior, undefined);
+  assert.match(tool.description, /exact Dataverse table/i);
+  assert.match(tool.description, /sitemap page/i);
+  assert.deepEqual(validateSchema(tool.inputSchema, { appModuleId: 'id', tableLogicalName: 'new_employee' }), []);
+});
+
 test('relationship schemas enforce type-specific table and lookup inputs', () => {
   const schema = MCP_TOOL_BY_NAME.get('create_relationship').inputSchema;
   assert.ok(validateSchema(schema, { type: 'oneToMany', schemaName: 'new_Account_Project' }).some(error => /referencedEntity/.test(error)));
@@ -74,7 +88,7 @@ test('form and view creation require complete source or a same-table template', 
   const view = MCP_TOOL_BY_NAME.get('create_view').inputSchema;
   assert.ok(validateSchema(view, { tableLogicalName: 'account', name: 'Active' }).length);
   assert.deepEqual(validateSchema(view, { tableLogicalName: 'account', name: 'Active', fetchXml: '<fetch/>', layoutXml: '<grid/>' }), []);
-  for (const name of ['patch_form', 'update_form', 'patch_view', 'update_view']) {
+  for (const name of ['edit_form_layout', 'patch_form', 'update_form', 'patch_view', 'update_view']) {
     assert.ok(MCP_TOOL_BY_NAME.get(name).inputSchema.required.includes('expectedRevision'), `${name} must require a fresh read revision`);
   }
 });
