@@ -62,3 +62,12 @@ test('concurrent audit appends remain individually parseable and complete', asyn
   const rows = (await fs.readFile(log.filePath, 'utf8')).trim().split('\n').map(JSON.parse);
   assert.equal(new Set(rows.map(row => row.id)).size, 30);
 });
+test('concurrent bounded-log updates are atomic and do not lose entries', async () => {
+  const log = new AppendOnlyLog('bounded.jsonl');
+  await Promise.all(Array.from({ length: 40 }, (_, id) => log.updateEntries(entries => ({
+    entries: [...entries, { id }]
+  }))));
+  const rows = await log.readEntries();
+  assert.equal(rows.length, 40);
+  assert.equal(new Set(rows.map(row => row.id)).size, 40);
+});

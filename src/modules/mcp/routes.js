@@ -20,7 +20,7 @@ import {
 } from './connections.js';
 import { claimDesktopJobs, completeDesktopJob, desktopStatus, heartbeatDesktop } from './broker.js';
 import { waitForSignal } from './signals.js';
-import { queryTransmissionAnalytics } from './analytics.js';
+import { buildTransmissionDiagnosticReport, clearTransmissionAnalytics, queryTransmissionAnalytics, TRANSMISSION_RETENTION } from './analytics.js';
 import { CEILINGS, DEFAULT_POLICY, DEVOPS_DEFAULT_POLICY, subjectsForResource, summarizePolicy } from './tool-policy.js';
 import { summarizeDevOpsGrant } from './devops-grant.js';
 import { MCP_TOOLS } from './tool-catalog.js';
@@ -390,7 +390,27 @@ export function registerMcpRoutes(router, { ideMcp } = {}) {
       since: ctx.url.searchParams.get('since') || '',
       limit: ctx.url.searchParams.get('limit') || 200
     });
-    sendJson(ctx, 200, { ok: true, analytics });
+    sendJson(ctx, 200, { ok: true, analytics, retention: TRANSMISSION_RETENTION });
+  });
+  router.get('/api/mcp/analytics/report', authenticate, requireMcpEntitlement, async ctx => {
+    const report = await buildTransmissionDiagnosticReport(ctx.auth.sub, {
+      tenantId: ctx.url.searchParams.get('tenantId') || '',
+      environmentId: ctx.url.searchParams.get('environmentId') || '',
+      toolName: ctx.url.searchParams.get('toolName') || ''
+    }, {
+      backend: buildInfo,
+      node: process.version
+    });
+    sendJson(ctx, 200, { ok: true, report });
+  });
+  router.delete('/api/mcp/analytics', authenticate, requireMcpEntitlement, async ctx => {
+    if (ctx.url.searchParams.get('confirm') !== 'true') throw new ForbiddenError('Confirm clearing MCP transmission history before continuing.');
+    const cleared = await clearTransmissionAnalytics(ctx.auth.sub, {
+      tenantId: ctx.url.searchParams.get('tenantId') || '',
+      environmentId: ctx.url.searchParams.get('environmentId') || '',
+      toolName: ctx.url.searchParams.get('toolName') || ''
+    });
+    sendJson(ctx, 200, { ok: true, ...cleared, retention: TRANSMISSION_RETENTION });
   });
 
   router.post('/api/mcp/bridge/heartbeat', authenticate, requireMcpEntitlement, async ctx => {

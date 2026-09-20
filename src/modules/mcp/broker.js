@@ -278,12 +278,13 @@ export async function completeDesktopJob({ userId, jobId, leaseToken, result, er
       throw new ValidationError('MCP job lease is invalid.');
     }
     const status = error || result?.ok === false ? 'failed' : 'completed';
+    const completedAt = new Date().toISOString();
     const updated = await collection.updateOne(
       { id: jobId, userId, status: { $in: ['leased', 'outcome_unknown'] }, leaseHash: job.leaseHash },
       {
         $set: {
           status,
-          completedAt: new Date().toISOString(),
+          completedAt,
           result: result ?? null,
           error: String(error || result?.error || '').slice(0, 4000) || null,
           leaseHash: null,
@@ -294,7 +295,7 @@ export async function completeDesktopJob({ userId, jobId, leaseToken, result, er
     );
     if (updated.matchedCount !== 1) throw new ValidationError('MCP job lease changed before completion.');
     notifySignal(`job:${jobId}`);
-    await auditCompletion(job, result, error);
+    await auditCompletion({ ...job, completedAt }, result, error);
     return { id: jobId, status };
   }
   let auditJob;
@@ -325,7 +326,21 @@ async function auditCompletion(job, result, error) {
   if (!job.auditContext) return;
   let timer;
   const failure = error || result?.ok === false ? Object.assign(new Error(error || result?.error || 'Desktop operation failed.'), { code: result?.code, status: result?.status, dataverseCode: result?.dataverseCode, requestId: result?.requestId, retryAfterSeconds: result?.retryAfterSeconds }) : null;
-  const delivery = recordTransmission({ connection: job.auditContext, tool: { name: job.toolName, action: job.action, risk: job.risk }, requestId: job.requestId || job.id, arguments: job.arguments, result: result?.result ?? result, error: failure, startedAt: Date.parse(job.createdAt) })
+  const execution = result?.execution && typeof result.execution === 'object'
+    ? result.execution
+    : result?.result?._desktopExecution && typeof result.result._desktopExecution === 'object'
+      ? result.result._desktopExecution
+      : null;
+  const delivery = recordTransmission({
+    connection: job.auditContext,
+    tool: { name: job.toolName, action: job.action, risk: job.risk },
+    requestId: job.requestId || job.id,
+    arguments: job.arguments,
+    result: result?.result ?? result,
+    error: failure,
+    startedAt: Date.parse(job.createdAt),
+    lifecycle: { claimedAt: job.claimedAt, completedAt: job.completedAt || new Date().toISOString(), clientInstanceId: job.clientInstanceId, execution }
+  })
     .catch(auditError => logger.warn('MCP completion audit could not be stored', { jobId: job.id, code: auditError.code || 'AUDIT_DELIVERY_FAILED' }));
   // The result is already durable. Telemetry must not hold its acknowledgment
   // hostage; a slow write can finish independently after this short budget.

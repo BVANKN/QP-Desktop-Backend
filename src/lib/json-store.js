@@ -110,6 +110,41 @@ export class AppendOnlyLog {
       }
     });
   }
+
+  // Bounded histories occasionally need a read/modify/rewrite transaction.
+  // Keep the complete operation under the same lock as append() so a
+  // concurrent MCP completion cannot be overwritten by retention or clearing.
+  async updateEntries(mutator) {
+    return withStoreLock(this.filePath, async () => {
+      let source = '';
+      try { source = await fsp.readFile(this.filePath, 'utf8'); }
+      catch (error) { if (error.code !== 'ENOENT') throw error; }
+      const current = source.split(/\r?\n/).filter(Boolean).flatMap(line => {
+        try { return [JSON.parse(line)]; } catch { return []; }
+      });
+      const outcome = await mutator(structuredClone(current)) || {};
+      const entries = Array.isArray(outcome) ? outcome : outcome.entries ?? current;
+      if (!Array.isArray(entries)) throw new TypeError('An append-only log update must return an entries array.');
+      const body = entries.map(entry => JSON.stringify(entry)).join('\n');
+      await atomicWrite(this.filePath, body ? `${body}\n` : '');
+      return Array.isArray(outcome) ? entries.length : outcome.result;
+    });
+  }
+
+  async readEntries() {
+    return withStoreLock(this.filePath, async () => {
+      let source;
+      try { source = await fsp.readFile(this.filePath, 'utf8'); }
+      catch (error) { if (error.code === 'ENOENT') return []; throw error; }
+      return source.split(/\r?\n/).filter(Boolean).flatMap(line => {
+        try { return [JSON.parse(line)]; } catch { return []; }
+      });
+    });
+  }
+
+  async replaceEntries(entries) {
+    return this.updateEntries(() => ({ entries: entries || [], result: entries?.length || 0 }));
+  }
 }
 
 export function ensureDataDir() {

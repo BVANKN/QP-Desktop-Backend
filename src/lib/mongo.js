@@ -138,7 +138,9 @@ async function ensureIndexes(db) {
     db.collection('mcp_transmissions').createIndexes([
       { key: { id: 1 }, name: 'transmission_id', unique: true },
       { key: { userId: 1, time: -1 }, name: 'transmission_user_time' },
-      { key: { userId: 1, tenantKey: 1, environmentKey: 1, toolName: 1, time: -1 }, name: 'transmission_filter' }
+      { key: { userId: 1, tenantKey: 1, environmentKey: 1, time: -1 }, name: 'transmission_scope_time' },
+      { key: { userId: 1, tenantKey: 1, environmentKey: 1, toolName: 1, time: -1 }, name: 'transmission_filter' },
+      { key: { retentionAt: 1 }, name: 'transmission_retention', expireAfterSeconds: 0 }
     ])
   ]);
 }

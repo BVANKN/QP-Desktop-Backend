@@ -77,7 +77,7 @@ oauth_authorizations   short-lived authorization + CSRF state (TTL)
 oauth_codes            one-time authorization codes (TTL)
 oauth_grants           rotating OAuth access/refresh token hashes
 audit_events           security audit trail
-mcp_transmissions      redacted MCP transmission analytics
+mcp_transmissions      redacted MCP transmission analytics (newest 250 per user/environment, max 30 days)
 server_secrets         generated signing-key set when QP_SIGNING_SECRET is absent
 ```
 
@@ -147,6 +147,8 @@ continues to apply field-name redaction.
 | DELETE | `/api/mcp/connections/:id` | QP Bearer + Pro | Revoke a connection key |
 | DELETE | `/api/mcp/connections/:id/permanent` | QP Bearer + Pro | Delete the connection record outright. Revoke stops access and keeps the record; this is the separate decision to stop keeping it. Transmission history is unaffected. |
 | GET | `/api/mcp/analytics` | QP Bearer + Pro | Stream-aggregate MCP transmission analytics |
+| GET | `/api/mcp/analytics/report` | QP Bearer + Pro | Export the retained, redacted transmission set with queue/approval/handler timing diagnostics |
+| DELETE | `/api/mcp/analytics?confirm=true` | QP Bearer + Pro | Clear the signed-in user's transmission history in the selected scope |
 | GET | `/.well-known/oauth-protected-resource/mcp/:userId/:tenantId` | — | RFC 9728 protected-resource discovery |
 | GET | `/.well-known/oauth-authorization-server` | — | RFC 8414 authorization-server discovery |
 | POST | `/oauth/register` | — | RFC 7591 dynamic registration for public PKCE clients |
