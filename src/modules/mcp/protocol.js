@@ -198,10 +198,15 @@ function resultContent(value, { tool, mode } = {}) {
 }
 
 async function executeTool(ctx, connection, tool, args, id, resourceKind = 'power-platform', scopedToolName = '') {
-  const validationErrors = validateSchema(executionModeSchema(tool.inputSchema, tool), args);
+  const expectedInputSchema = executionModeSchema(tool.inputSchema, tool);
+  const validationErrors = validateSchema(expectedInputSchema, args);
   const resumeOnly = RESUMABLE_PLUGIN_TOOLS.has(tool.name) && typeof args?.resumeOperationId === 'string' && Object.keys(args || {}).every(key => ['resumeOperationId', 'executionMode'].includes(key));
   if (tool.annotations.destructiveHint && !resumeOnly && args?.confirm !== true) validationErrors.push('arguments.confirm must be true after explicit user approval.');
-  if (validationErrors.length) return jsonRpcError(id, -32602, 'Invalid tool arguments.', { errors: validationErrors });
+  if (validationErrors.length) return jsonRpcError(id, -32602, 'Invalid tool arguments.', {
+    errors: validationErrors,
+    guidance: 'Correct the payload to match expectedInputSchema exactly. Do not guess casing, wrapper objects, aliases, enum values, or extra properties. Retry only after the local schema validates.',
+    expectedInputSchema
+  });
 
   if (tool.quarantined) {
     return { jsonrpc: '2.0', id, result: {

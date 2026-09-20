@@ -6,7 +6,7 @@ export function extendedTools({ tool, object, string, boolean, array, number }) 
   const name = { ...string('Dataverse logical or entity-set name from current metadata.'), pattern: '^[A-Za-z_][A-Za-z0-9_]*$' };
   const confirm = { type: 'boolean', const: true, description: 'Explicitly confirm the reviewed change.' };
   const scalar = { type: ['string', 'number', 'boolean', 'null'], description: 'Requested scalar setting value. Use the type from the current settings read.' };
-  const row = { type: 'object', additionalProperties: true, description: 'Values keyed by logical column names. Updates need the primary ID (not alternate keys). Upserts need a primary ID or @odata.id with a relative alternate-key URL, e.g. accounts(accountnumber=\u0027A1\u0027). Never repeat a target in the batch.' };
+  const row = { type: 'object', additionalProperties: true, 'x-quickerportal-dynamic-keys': true, description: 'Values keyed by exact logical column names discovered from the current table schema. This object is intentionally dynamic because every Dataverse table has different columns. Updates need the primary ID (not alternate keys). Upserts need a primary ID or @odata.id with a relative alternate-key URL, e.g. accounts(accountnumber=\u0027A1\u0027). Never repeat a target in the batch; do not guess display/schema names.' };
   const target = { logicalName: name, entitySet: name, recordId: id, primaryId: name };
   const principal = { principalId: id, principalType: { type: 'string', enum: ['systemuser', 'team'] } };
   const sharing = { ...target, ...principal };

@@ -48,7 +48,95 @@ const tableName = string('Dataverse table logical name, for example account or n
 const columnName = string('Dataverse column logical name.');
 const recordId = string('Dataverse record GUID.');
 const confirm = boolean('Must be true after the user explicitly approves this destructive operation.');
-const arbitraryPayload = { type: 'object', description: 'Dataverse values keyed by logical column name.', additionalProperties: true };
+const dynamicPayload = description => ({
+  type: 'object',
+  description,
+  additionalProperties: true,
+  'x-quickerportal-dynamic-keys': true
+});
+const dataverseRowPayload = dynamicPayload('Dataverse row values keyed by CURRENT logical column name. Scalar fields use their native JSON value. Lookup bindings use the exact navigation property key as <NavigationProperty>@odata.bind with a value like /accounts(<guid>). Read table/column metadata first when names or types are unknown; do not guess display names, schema names, or lookup navigation properties.');
+const arbitraryPayload = dynamicPayload('Operation-specific JSON whose valid keys are determined by live metadata or the corresponding read/discovery tool. Do not invent aliases or fixed properties that are not documented by the owning tool.');
+const requiredLevel = { type: 'string', enum: ['None', 'SystemRequired', 'ApplicationRequired', 'Recommended'], description: 'Exact Dataverse requirement-level token accepted by the desktop.' };
+const tableCreateDefinition = object({
+  schemaName: string('Table schema name. Required. Must start with a letter and contain only letters, numbers, and underscores, for example new_Project.'),
+  displayName: string('Singular display name. Optional; defaults to schemaName.'),
+  pluralName: string('Plural display name. Optional; defaults to displayName + "s".'),
+  description: string('Optional table description.'),
+  ownershipType: { type: 'string', enum: ['UserOwned', 'OrganizationOwned'], description: 'Exact ownership token. Any other value would otherwise silently become UserOwned, so MCP rejects it.' },
+  primaryNameSchemaName: string('Primary name column schema name. Optional; defaults to <schemaName>Name.'),
+  primaryNameDisplayName: string('Primary name column display name. Optional; defaults to Name.'),
+  primaryNameMaxLength: number('Primary name maximum length. Desktop clamps to 1..4000; MCP requires that range explicitly.', { minimum: 1, maximum: 4000 }),
+  hasActivities: boolean('Enable activities on creation.'),
+  hasNotes: boolean('Enable notes on creation.'),
+  isAvailableOffline: boolean('Enable offline availability on creation.'),
+  isAuditEnabled: boolean('Enable table auditing on creation.')
+}, ['schemaName']);
+const tableUpdateChanges = { ...object({
+  displayName: string('New singular display name.'),
+  pluralName: string('New plural display name.'),
+  description: string('New table description.'),
+  isAuditEnabled: boolean('Enable/disable auditing when Dataverse permits it.'),
+  isDuplicateDetectionEnabled: boolean('Enable/disable duplicate detection.'),
+  isValidForAdvancedFind: boolean('Enable/disable Advanced Find visibility.'),
+  isQuickCreateEnabled: boolean('Enable/disable quick create.'),
+  changeTrackingEnabled: boolean('Enable/disable change tracking.'),
+  isAvailableOffline: boolean('Enable/disable offline availability.')
+}), minProperties: 1 };
+const columnChoiceOption = object({
+  label: string('Option label. Canonical property; the desktop also tolerates Label but MCP intentionally advertises one spelling.'),
+  value: number('Optional integer value. If omitted, desktop uses 100000000 + option index.'),
+  description: string('Optional option description.')
+}, ['label']);
+const columnCreateType = { type: 'string', enum: ['Text','MultilineText','WholeNumber','Decimal','Money','DateTime','Boolean','Choice','Picklist','OptionSet'], description: 'Exact desktop tokens. Choice, Picklist, and OptionSet are accepted aliases for the same local choice type. Lookup is intentionally invalid here; use create_relationship.' };
+const columnCreateDefinition = {
+  ...object({
+    schemaName: string('Column schema name. Required. Must start with a letter and contain only letters, numbers, and underscores.'),
+    displayName: string('Column display name. Optional; defaults to schemaName.'),
+    description: string('Optional column description.'),
+    type: columnCreateType,
+    requiredLevel,
+    maxLength: number('Text/MultilineText maximum length. Text range 1..4000; MultilineText range 1..1048576.', { minimum: 1, maximum: 1048576 }),
+    minValue: number('WholeNumber, Decimal, or Money minimum value.'),
+    maxValue: number('WholeNumber, Decimal, or Money maximum value.'),
+    precision: number('Decimal precision 0..10; Money precision 0..4.', { minimum: 0, maximum: 10 }),
+    dateFormat: { type: 'string', enum: ['DateOnly','DateAndTime'], description: 'DateTime Format passed to Dataverse. Defaults to DateOnly.' },
+    dateBehavior: { type: 'string', enum: ['UserLocal','DateOnly','TimeZoneIndependent'], description: 'DateTimeBehavior token. Defaults to UserLocal.' },
+    defaultValue: boolean('Default Boolean value.'),
+    trueLabel: string('Boolean true-option label. Defaults to Yes.'),
+    falseLabel: string('Boolean false-option label. Defaults to No.'),
+    optionSetOptions: array(columnChoiceOption, 'Canonical structured options for Choice/Picklist/OptionSet.', { minItems: 1, maxItems: 1000 }),
+    options: string('Alternative compact choice labels separated by semicolon or comma, for example Active;Inactive. Prefer optionSetOptions for explicit values/descriptions.')
+  }, ['schemaName']),
+  allOf: [
+    { if: { properties: { type: { enum: ['Choice','Picklist','OptionSet'] } }, required: ['type'] }, then: { anyOf: [{ required: ['optionSetOptions'] }, { required: ['options'] }] } },
+    { if: { properties: { type: { const: 'Text' } }, required: ['type'] }, then: { properties: { maxLength: { maximum: 4000 } } } },
+    { if: { properties: { type: { const: 'Money' } }, required: ['type'] }, then: { properties: { precision: { maximum: 4 } } } }
+  ]
+};
+const columnUpdateChanges = { ...object({
+  displayName: string('New display name.'),
+  description: string('New description.'),
+  requiredLevel,
+  maxLength: number('New MaxLength for String/Memo columns when supported.', { minimum: 1, maximum: 1048576 }),
+  precision: number('New precision for Decimal/Money columns when supported.', { minimum: 0, maximum: 10 }),
+  isAuditEnabled: boolean('Enable/disable auditing when Dataverse permits it.'),
+  isValidForAdvancedFind: boolean('Enable/disable Advanced Find visibility when Dataverse permits it.'),
+  isSecured: boolean('Enable/disable field security when supported by the column.')
+}), minProperties: 1 };
+const modelAppChanges = { ...object({
+  name: string('New model-driven app display name.'),
+  description: string('New app description.'),
+  navigationType: number('Dataverse navigationtype numeric value.'),
+  isFeatured: boolean('Whether the app is featured.'),
+  webResourceId: string('Existing SVG web-resource GUID to use as the modern app icon.')
+}), minProperties: 1 };
+const connectionReferenceChanges = { ...object({
+  displayName: string('New connection-reference display name; must not be blank.'),
+  connectionId: string('Connection ID; empty string clears the current value.'),
+  connectorId: string('API Hub connector resource ID; empty string clears the current value.'),
+  description: string('Description; empty string clears it.'),
+  promptingBehavior: { type: 'number', enum: [0,1], description: '0 = Prompt on import; 1 = Skip.' }
+}), minProperties: 1 };
 const jsonPatchOperation = {
   type: 'object',
   description: 'One targeted JSON operation. Paths are RFC 6901 JSON Pointers into the exact document returned by the read tool.',
@@ -140,11 +228,7 @@ const bpfWorkflowId = string('Business Process Flow workflow GUID.');
 // real hierarchy is worth stating because there is no `StageStep` class in it -
 // a stage is a PageStep, and a step's bound column lives on its child
 // ControlStep.
-const bpfClientData = {
-  type: 'object',
-  description: 'Complete BPF clientdata document. WorkflowStep at the root, then one EntityStep per participating table, a PageStep per stage, a StepStep per step, and a ControlStep under each step carrying its dataFieldName. It must describe the same process as the XAML sent with it.',
-  additionalProperties: true
-};
+const bpfClientData = dynamicPayload('Complete BPF clientdata document. WorkflowStep at the root, then one EntityStep per participating table, a PageStep per stage, a StepStep per step, and a ControlStep under each step carrying its dataFieldName. It must describe the same process as the XAML sent with it. The object is intentionally dynamic because the process graph is recursive; use read_business_process_flow/get_business_process_flow before editing an existing document.');
 const bpfInclude = array(
   { type: 'string', enum: ['summary', 'related', 'xaml', 'clientData', 'all'] },
   'What to return. Defaults to summary and related. A real flow carries roughly 12 KB of XAML and 36 KB of clientdata, so request those only when composing an edit; their byte sizes are always reported either way.',
@@ -160,7 +244,7 @@ const bpfMetadataChanges = object({
 const dataverseBulkFields = {
   entitySet: string('Dataverse entity-set name.'),
   logicalName: tableName,
-  rows: array(arbitraryPayload, 'One to 1,000 records. Update rows must include their primary key; upsert rows must include a key.', { minItems: 1, maxItems: 1000 }),
+  rows: array(dataverseRowPayload, 'One to 1,000 records. Update rows must include their primary key; upsert rows must include a key.', { minItems: 1, maxItems: 1000 }),
   elastic: boolean('True only for an elastic table.')
 };
 const dataverseRecordReference = {
@@ -177,7 +261,7 @@ const sharePointItemId = string('Drive-item ID returned by a SharePoint read too
 const sharePointSiteId = string('SharePoint site ID returned by search_sharepoint_sites or get_sharepoint_connection.');
 const sharePointListId = string('SharePoint list ID returned by get_sharepoint_site.');
 const sharePointColumnId = string('SharePoint column ID returned by list_sharepoint_columns or get_sharepoint_column.');
-const sharePointFields = { type: 'object', description: 'SharePoint list fields keyed by internal column name. Preserve fields you are not changing.', additionalProperties: true };
+const sharePointFields = dynamicPayload('SharePoint list fields keyed by exact INTERNAL column name from list_sharepoint_columns. The keys are intentionally dynamic because each list has its own schema. Preserve fields you are not changing and do not guess display labels.');
 const sharePointListTemplate = { type: 'string', enum: ['genericList', 'documentLibrary', 'links', 'announcements', 'contacts', 'events', 'tasks'], description: 'Supported SharePoint list template. Use genericList unless the user requests a specific template.' };
 const sharePointColumnType = { type: 'string', enum: ['text', 'multilineText', 'number', 'currency', 'boolean', 'choice', 'multiChoice', 'dateTime', 'hyperlink', 'person', 'lookup'], description: 'Supported SharePoint column type.' };
 const sharePointColumnProperties = {
@@ -222,7 +306,7 @@ const powerPagesComponentType = {
   enum: ['publishingState','webPage','webFile','webLinkSet','webLink','pageTemplate','contentSnippet','webTemplate','siteSetting','pageAccessRule','webRole','websiteAccess','siteMarker','basicForm','basicFormMetadata','list','tablePermission','advancedForm','advancedFormStep','advancedFormMetadata','pollPlacement','adPlacement','botConsumer','columnPermissionProfile','columnPermission','redirect','publishingTransitionRule','shortcut','cloudFlow','uxComponent'],
   description: 'Power Pages component family. The desktop resolves standard adx_* or enhanced powerpagecomponent storage automatically.'
 };
-const powerPagesValues = { type: 'object', description: 'Only the component or operation fields to create/change. Dataverse lookup binds are supported where required.', additionalProperties: true };
+const powerPagesValues = dynamicPayload('Power Pages component/operation fields returned by the corresponding read/list tool for the selected componentType/operation. Keys are intentionally dynamic because supported fields differ by component family and site data model. Send only fields read/discovered for that exact component; Dataverse lookup binds are supported where required.');
 // Canvas authoring has many small, purpose-specific tools. Keep their repeated
 // fields compact so the paged tools/list response stays inexpensive without
 // sacrificing the operation-specific guidance models need.
@@ -254,49 +338,64 @@ const commandRuleType = {
   enum: ['EntityRule', 'FormStateRule', 'FormTypeRule', 'SelectionCountRule', 'ValueRule', 'EntityPrivilegeRule', 'RecordPrivilegeRule', 'EntityPropertyRule', 'OrganizationSettingRule', 'CustomRule'],
   description: 'Classic ribbon rule condition.'
 };
-const commandRule = {
-  type: 'object',
-  description: 'One rule. Besides type, use the rule-specific fields returned by get_command_bar_control (for example field/value, minimum/maximum, privilegeType, or library/functionName/parameters).',
-  properties: { type: commandRuleType },
-  required: ['type'],
-  additionalProperties: true
-};
+const ribbonAttributes = dynamicPayload('Advanced classic-ribbon XML attributes keyed by their exact Dataverse XML attribute names. Prefer the typed rule properties below; use attributes only for rule attributes returned by get_command_bar_control that must be preserved verbatim.');
+const commandRule = object({
+  type: commandRuleType,
+  id: string('Optional explicit rule ID. Omit to let Quicker Portal generate a stable ID.'),
+  attributes: ribbonAttributes,
+  parameters: array(commandParameter, 'CustomRule parameters.', { maxItems: 24 }),
+  defaultValue: boolean('Classic rule Default attribute.'),
+  invertResult: boolean('Classic rule InvertResult attribute.'),
+  entityName: tableName,
+  context: string('EntityRule context, normally Entity.'),
+  appliesTo: string('Rule AppliesTo value.'),
+  state: string('FormStateRule state, for example Existing.'),
+  formType: string('FormTypeRule form type, for example Main.'),
+  minimum: number('SelectionCountRule minimum.', { minimum: 0 }),
+  maximum: number('SelectionCountRule maximum.', { minimum: 0 }),
+  field: columnName,
+  value: { description: 'ValueRule comparison value.' },
+  privilegeType: string('Privilege type such as Read, Write, Create, or Delete.'),
+  privilegeDepth: string('Privilege depth such as Basic, Local, Deep, or Global.'),
+  propertyName: string('EntityPropertyRule property name.'),
+  propertyValue: { description: 'EntityPropertyRule property value.' },
+  setting: string('OrganizationSettingRule setting name.'),
+  library: string('CustomRule JavaScript web resource.'),
+  functionName: string('CustomRule JavaScript function name.')
+}, ['type']);
 const commandDefinitionProperties = {
+  prefix: string('Identifier prefix. Defaults to new.'),
   name: string('Unique command name used to generate stable RibbonDiffXml identifiers.'),
   label: string('Visible command label.'),
+  description: string('Tooltip/description text.'),
   surface: commandSurface,
-  action: commandAction
+  sequence: number('Placement sequence; values below 1 are not valid.', { minimum: 1 }),
+  controlType: { type: 'string', enum: ['button','dropdown','split'], description: 'Exact supported control type.' },
+  image16: string('Optional 16x16 image/web-resource reference.'),
+  image32: string('Optional 32x32 image/web-resource reference.'),
+  action: commandAction,
+  displayRules: array(commandRule, 'Complete display-rule definitions.', { maxItems: 32 }),
+  enableRules: array(commandRule, 'Complete enable-rule definitions.', { maxItems: 32 })
 };
 const createCommandDefinition = {
-  type: 'object',
-  description: 'Command definition. Required: name, label, surface, action. Optional: prefix, description, sequence, controlType, image16, image32, displayRules, and enableRules.',
-  properties: commandDefinitionProperties,
-  required: ['name', 'label', 'surface', 'action'],
-  additionalProperties: true
+  ...object(commandDefinitionProperties, ['name', 'label', 'surface', 'action']),
+  description: 'Command definition with optional prefix, tooltip, sequence, control type, images, displayRules, and enableRules.'
 };
 const cloneCommandDefinition = {
-  type: 'object',
-  description: 'Clone overrides. name is required; optional properties match create_command_bar_control.command.',
-  properties: {
-    name: commandDefinitionProperties.name,
-    label: commandDefinitionProperties.label,
-    surface: commandDefinitionProperties.surface,
-    sequence: number('New placement sequence.', { minimum: 1 })
-  },
-  required: ['name'],
-  additionalProperties: true
+  ...object(commandDefinitionProperties, ['name']),
+  description: 'Clone overrides. name is required; omitted properties are inherited from the source command.'
 };
-const commandChanges = {
-  type: 'object',
-  description: 'Fields to replace. Supports label, description, surface, sequence, image16, image32, action, displayRules, and enableRules. Rule arrays replace the complete corresponding set; omitted fields are preserved.',
-  properties: {
-    label: string('New visible label.'),
-    surface: commandSurface,
-    sequence: number('New placement sequence.', { minimum: 1 }),
-    action: commandAction
-  },
-  additionalProperties: true
-};
+const commandChanges = { ...object({
+  label: commandDefinitionProperties.label,
+  description: commandDefinitionProperties.description,
+  surface: commandDefinitionProperties.surface,
+  sequence: commandDefinitionProperties.sequence,
+  image16: commandDefinitionProperties.image16,
+  image32: commandDefinitionProperties.image32,
+  action: commandDefinitionProperties.action,
+  displayRules: commandDefinitionProperties.displayRules,
+  enableRules: commandDefinitionProperties.enableRules
+}), minProperties: 1, description: 'Fields to replace. Rule arrays replace the complete corresponding set; omitted fields are preserved.' };
 const commandChangeContext = {
   logicalName: tableName,
   solutionUniqueName: string('Unmanaged solution unique name that owns the command-bar customization.'),
@@ -310,9 +409,17 @@ const commandChangeContext = {
   confirm: boolean('Must be true after explicit user approval of deployment and publish.')
 };
 const commandPreviewMutation = {
-  type: 'object',
-  description: 'Operation-specific payload. create: command. clone: controlId, optional surface/command/copyRules. update: controlId/changes. rules: controlId and displayRules and/or enableRules. hide, unhide, or delete: controlId. includeXml is optional for every operation.',
-  additionalProperties: true
+  oneOf: [
+    object({ command: createCommandDefinition, includeXml: commandChangeContext.includeXml }, ['command']),
+    object({ controlId: commandChangeContext.controlId, surface: commandChangeContext.surface, command: cloneCommandDefinition, copyRules: commandChangeContext.copyRules, includeXml: commandChangeContext.includeXml }, ['controlId','command']),
+    object({ controlId: commandChangeContext.controlId, changes: commandChanges, includeXml: commandChangeContext.includeXml }, ['controlId','changes']),
+    {
+      ...object({ controlId: commandChangeContext.controlId, displayRules: commandChangeContext.displayRules, enableRules: commandChangeContext.enableRules, includeXml: commandChangeContext.includeXml }, ['controlId']),
+      anyOf: [{ required: ['displayRules'] }, { required: ['enableRules'] }]
+    },
+    object({ controlId: commandChangeContext.controlId, includeXml: commandChangeContext.includeXml }, ['controlId'])
+  ],
+  description: 'Operation-specific command-bar payload. The selected operation determines which shape is valid; unknown properties are rejected.'
 };
 
 export const MCP_TOOLS = Object.freeze([
@@ -464,18 +571,18 @@ export const MCP_TOOLS = Object.freeze([
   tool('execute_fetchxml', 'fetchxml', 'Execute FetchXML against the connected environment with Dataverse paging.', object({ fetchXml: string('Complete FetchXML query.'), pageSize: number('Rows per page, from 1 to 5000.', { minimum: 1, maximum: 5000 }) }, ['fetchXml'])),
   tool('create_records', 'mcpCreateRecords', 'Create 1–1,000 Dataverse rows in one reviewed operation. Prefer this tool whenever creating more than one row; it uses CreateMultiple when supported and an atomic $batch fallback otherwise, so the desktop asks for one approval for the complete bounded batch.', object({
     tableLogicalName: tableName,
-    records: array(arbitraryPayload, 'Dataverse rows keyed by logical column name. All rows must target the same table.', { minItems: 1, maxItems: 1000 }),
+    records: array(dataverseRowPayload, 'Dataverse rows keyed by logical column name. All rows must target the same table.', { minItems: 1, maxItems: 1000 }),
     elastic: boolean('Set true only when the target is an elastic table.')
   }, ['tableLogicalName', 'records']), { readOnly: false, timeoutMs: 90_000 }),
-  tool('create_record', 'mcpCreateRecord', 'Create one Dataverse row. Returns the created record identifier.', object({ tableLogicalName: tableName, values: arbitraryPayload }, ['tableLogicalName', 'values']), { readOnly: false }),
-  tool('update_record', 'mcpUpdateRecord', 'Update selected values on one Dataverse row.', object({ tableLogicalName: tableName, recordId, values: arbitraryPayload }, ['tableLogicalName', 'recordId', 'values']), { readOnly: false, idempotent: true }),
+  tool('create_record', 'mcpCreateRecord', 'Create one Dataverse row. Returns the created record identifier.', object({ tableLogicalName: tableName, values: dataverseRowPayload }, ['tableLogicalName', 'values']), { readOnly: false }),
+  tool('update_record', 'mcpUpdateRecord', 'Update selected values on one Dataverse row.', object({ tableLogicalName: tableName, recordId, values: dataverseRowPayload }, ['tableLogicalName', 'recordId', 'values']), { readOnly: false, idempotent: true }),
   tool('delete_record', 'mcpDeleteRecord', 'Permanently delete one Dataverse row after explicit approval.', object({ tableLogicalName: tableName, recordId, confirm }, ['tableLogicalName', 'recordId', 'confirm']), { readOnly: false, destructive: true }),
 
-  tool('create_table', 'createTable', 'Create a custom Dataverse table from the supplied table definition.', object({ definition: arbitraryPayload }, ['definition']), { readOnly: false, argumentEnvelope: 'definition' }),
-  tool('update_table', 'updateTable', 'Update supported metadata for a custom Dataverse table.', object({ logicalName: tableName, changes: arbitraryPayload }, ['logicalName', 'changes']), { readOnly: false, idempotent: true, argumentEnvelope: 'changes' }),
+  tool('create_table', 'createTable', 'Create a custom Dataverse table using the exact simplified desktop contract. This is NOT raw Dataverse EntityMetadata. Unknown properties are rejected before dispatch.', object({ definition: tableCreateDefinition }, ['definition']), { readOnly: false, argumentEnvelope: 'definition' }),
+  tool('update_table', 'updateTable', 'Update only the table properties the desktop implementation actually supports. Unknown or immutable properties are rejected before dispatch.', object({ logicalName: tableName, changes: tableUpdateChanges }, ['logicalName', 'changes']), { readOnly: false, idempotent: true, argumentEnvelope: 'changes' }),
   tool('delete_table', 'deleteTable', 'Delete a custom Dataverse table after explicit approval.', object({ logicalName: tableName, confirm }, ['logicalName', 'confirm']), { readOnly: false, destructive: true }),
-  tool('create_column', 'createColumn', 'Create a Dataverse scalar or choice column. Use create_relationship for lookup columns so the relationship and lookup are verified together.', object({ tableLogicalName: tableName, definition: arbitraryPayload }, ['tableLogicalName', 'definition']), { readOnly: false, argumentEnvelope: 'definition' }),
-  tool('update_column', 'updateColumn', 'Update supported metadata for a Dataverse column.', object({ tableLogicalName: tableName, columnLogicalName: columnName, changes: arbitraryPayload }, ['tableLogicalName', 'columnLogicalName', 'changes']), { readOnly: false, idempotent: true, argumentEnvelope: 'changes' }),
+  tool('create_column', 'createColumn', 'Create a Dataverse column using the exact desktop payload vocabulary. Do not send SDK metadata names, UI labels, required=true, or guessed type aliases. Use create_relationship for lookups.', object({ tableLogicalName: tableName, definition: columnCreateDefinition }, ['tableLogicalName', 'definition']), { readOnly: false, argumentEnvelope: 'definition' }),
+  tool('update_column', 'updateColumn', 'Update only mutable column fields supported by the desktop handler. Type/schema/logical-name changes are not accepted.', object({ tableLogicalName: tableName, columnLogicalName: columnName, changes: columnUpdateChanges }, ['tableLogicalName', 'columnLogicalName', 'changes']), { readOnly: false, idempotent: true, argumentEnvelope: 'changes' }),
   tool('delete_column', 'deleteColumn', 'Delete a custom Dataverse column after explicit approval.', object({ tableLogicalName: tableName, columnLogicalName: columnName, confirm }, ['tableLogicalName', 'columnLogicalName', 'confirm']), { readOnly: false, destructive: true }),
   tool('create_alternate_key', 'createAlternateKey', 'Create a Dataverse alternate key after validating supported columns and platform limits. Key provisioning continues asynchronously in Dataverse.', object({ tableLogicalName: tableName, schemaName: string('Alternate-key schema name.'), displayName: string('Display name.'), keyAttributes: array(columnName, 'One to sixteen supported column logical names.', { minItems: 1, maxItems: 16 }), solutionUniqueName }, ['tableLogicalName', 'schemaName', 'keyAttributes']), { readOnly: false, timeoutMs: 90_000 }),
   tool('set_alternate_key_state', 'setAlternateKeyActive', 'Activate or deactivate an alternate key by logical name.', object({ tableLogicalName: tableName, keyLogicalName: string('Alternate-key logical/schema name.'), active: boolean('True to activate, false to deactivate.') }, ['tableLogicalName', 'keyLogicalName', 'active']), { readOnly: false, idempotent: true }),
@@ -530,7 +637,7 @@ export const MCP_TOOLS = Object.freeze([
   tool('list_model_apps', 'mdaApps', 'List model-driven applications in the environment.'),
   tool('get_model_app', 'mdaAppDetail', 'Get model-driven app metadata, navigation components, access, and branding.', object({ appModuleId: string('App module GUID.') }, ['appModuleId'])),
   tool('create_model_app', 'createMdaApp', 'Create and canonically verify a model-driven app shell using the documented AppModule GUID icon contract. Optionally supply semantic navigation so the app is attached, validated, and publishable in one operation.', object({ name: string('App display name.'), uniqueName: string('App unique name.'), description: string('App description.'), webResourceId: string('Optional SVG web-resource GUID for the app icon; the documented system default is used when omitted.'), solutionUniqueName, clientType: number('App client type; defaults to Unified Interface.'), formFactor: number('App form factor; defaults to desktop.'), navigationType: number('App navigation type.'), publish: boolean('Publish after verified creation.'), sitemapName: string('Optional site-map display name.'), areas: array(sitemapArea, 'Optional initial semantic navigation.', { minItems: 1, maxItems: 20 }), showHome: boolean('Show Home.'), showPinned: boolean('Show Pinned.'), showRecents: boolean('Show Recent.'), enableCollapsibleGroups: boolean('Allow collapsible groups.') }, ['name', 'uniqueName']), { readOnly: false, timeoutMs: 120_000 }),
-  tool('update_model_app', 'updateMdaApp', 'Update editable model-driven app metadata.', object({ appModuleId: string('App module GUID.'), changes: arbitraryPayload }, ['appModuleId', 'changes']), { readOnly: false, idempotent: true, argumentEnvelope: 'changes' }),
+  tool('update_model_app', 'updateMdaApp', 'Update editable model-driven app metadata.', object({ appModuleId: string('App module GUID.'), changes: modelAppChanges }, ['appModuleId', 'changes']), { readOnly: false, idempotent: true, argumentEnvelope: 'changes' }),
   tool('get_model_app_sitemap', 'mdaSitemap', 'Read the current model-driven app sitemap and its stale-write revision.', object({ appModuleId: string('App module GUID.') }, ['appModuleId'])),
   tool('configure_model_app_sitemap', 'saveMdaSitemap', 'Create or replace semantic MDA navigation, publish it, validate the app, and re-read the exact persisted XML.', object({ appModuleId: string('App module GUID.'), expectedRevision: string('Required current revision when replacing an existing sitemap.'), name: string('Site map name.'), areas: array(sitemapArea, 'Ordered navigation areas.', { minItems: 1, maxItems: 20 }), showHome: boolean('Show Home.'), showPinned: boolean('Show Pinned.'), showRecents: boolean('Show Recent.'), enableCollapsibleGroups: boolean('Allow collapsible groups.'), solutionUniqueName }, ['appModuleId', 'areas']), { readOnly: false, idempotent: true, timeoutMs: 120_000 }),
   tool('patch_model_app_sitemap', 'patchMdaSitemap', 'Preferred low-level site-map repair: read the current SiteMap XML on the desktop, apply unique anchored edits, publish, validate, and re-read exact persisted XML.', object({ appModuleId: string('App module GUID.'), expectedRevision: string('Required revision returned by get_model_app_sitemap.'), edits: array(anchoredTextEdit, 'Targeted edits against the current SiteMap XML.', { minItems: 1, maxItems: 128 }), name: string('Optional site-map name.'), publish: boolean('Publish after save; defaults to true.') }, ['appModuleId', 'expectedRevision', 'edits']), { readOnly: false, idempotent: true, timeoutMs: 120_000 }),
@@ -563,7 +670,7 @@ export const MCP_TOOLS = Object.freeze([
   tool('list_connection_references', 'connectionReferences', 'List connection references and binding status.'),
   tool('get_connection_reference', 'connectionReferenceDetail', 'Get a connection reference, dependencies, and using flows.', object({ connectionReferenceId: string('Connection reference GUID.') }, ['connectionReferenceId'])),
   tool('create_connection_reference', 'createConnectionReference', 'Create and verify an unmanaged connection reference. A connection ID is optional because user consent may need to be completed separately.', object({ logicalName: string('Publisher-prefixed connection-reference logical name.'), displayName: string('Display name.'), connectorId: string('API Hub connector resource path.'), connectionId: string('Optional existing connection ID.'), description: string('Optional description.'), promptingBehavior: { type: 'number', enum: [0,1], description: '0 prompts on import; 1 skips prompting.' }, solutionUniqueName }, ['logicalName', 'displayName', 'connectorId']), { readOnly: false }),
-  tool('update_connection_reference', 'updateConnectionReference', 'Update an unmanaged connection reference.', object({ connectionReferenceId: string('Connection reference GUID.'), changes: arbitraryPayload }, ['connectionReferenceId', 'changes']), { readOnly: false, idempotent: true }),
+  tool('update_connection_reference', 'updateConnectionReference', 'Update an unmanaged connection reference.', object({ connectionReferenceId: string('Connection reference GUID.'), changes: connectionReferenceChanges }, ['connectionReferenceId', 'changes']), { readOnly: false, idempotent: true, argumentEnvelope: 'changes' }),
   tool('set_connection_reference_state', 'setConnectionReferenceState', 'Activate or deactivate a connection reference.', object({ connectionReferenceId: string('Connection reference GUID.'), active: boolean('True to activate.') }, ['connectionReferenceId', 'active']), { readOnly: false, idempotent: true }),
   tool('delete_connection_reference', 'deleteConnectionReference', 'Delete an unmanaged connection reference after explicit approval.', object({ connectionReferenceId: string('Connection reference GUID.'), confirm }, ['connectionReferenceId', 'confirm']), { readOnly: false, destructive: true }),
   tool('list_environment_variables', 'environmentVariables', 'List environment variable definitions, current/default values, and dependencies.'),
