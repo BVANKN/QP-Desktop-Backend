@@ -127,43 +127,43 @@ continues to apply field-name redaction.
 
 ## API
 
-| Method | Endpoint | Auth | Purpose |
-|---|---|---|---|
-| GET | `/api/health` | — | Liveness probe |
-| GET | `/api/version` | — | Running commit, startup time, and effective MCP OAuth lifetimes (no credentials) |
-| GET | `/api/plans` | — | Plan catalog |
-| POST | `/api/auth/signup/start` | — | Begin signup, email a code |
-| POST | `/api/auth/signup/resend` | — | Resend the code (throttled) |
-| POST | `/api/auth/signup/verify` | — | Prove the code, create the account |
-| POST | `/api/auth/login` | — | Sign in with username **or** email |
-| POST | `/api/auth/refresh` | — | Rotate refresh token, mint access token |
-| POST | `/api/auth/logout` | — | Revoke one session |
-| POST | `/api/auth/logout-all` | Bearer | Revoke every session |
-| GET | `/api/auth/me` | Bearer | Identity + authoritative entitlements |
-| POST | `/api/auth/password` | Bearer | Change password, revokes all sessions |
-| POST | `/api/account/plan` | Bearer | Change plan (payment is out of scope) |
-| GET | `/api/mcp/tools` | QP Bearer + Pro | Governed Power Platform tool catalog |
-| GET/POST | `/api/mcp/connections` | QP Bearer + Pro | List/create tenant-scoped MCP connections |
-| DELETE | `/api/mcp/connections/:id` | QP Bearer + Pro | Revoke a connection key |
-| DELETE | `/api/mcp/connections/:id/permanent` | QP Bearer + Pro | Delete the connection record outright. Revoke stops access and keeps the record; this is the separate decision to stop keeping it. Transmission history is unaffected. |
-| GET | `/api/mcp/analytics` | QP Bearer + Pro | Stream-aggregate MCP transmission analytics |
-| GET | `/api/mcp/analytics/report` | QP Bearer + Pro | Export the retained, redacted transmission set with queue/approval/handler timing diagnostics |
-| DELETE | `/api/mcp/analytics?confirm=true` | QP Bearer + Pro | Clear the signed-in user's transmission history in the selected scope |
-| GET | `/.well-known/oauth-protected-resource/mcp/:userId/:tenantId` | — | RFC 9728 protected-resource discovery |
-| GET | `/.well-known/oauth-authorization-server` | — | RFC 8414 authorization-server discovery |
-| POST | `/oauth/register` | — | RFC 7591 dynamic registration for public PKCE clients |
-| GET/POST | `/oauth/authorize` | — | User sign-in, consent, and authorization-code issuance |
-| POST | `/oauth/token` | — | Authorization-code exchange and refresh-token rotation |
-| POST | `/oauth/revoke` | — | Revoke an OAuth grant |
-| POST | `/mcp/:userId/:tenantId` | OAuth or MCP Bearer | Stateless Streamable HTTP JSON-RPC endpoint |
-| POST | `/mcp/:userId/:tenantId/:toolName` | OAuth or MCP Bearer | Optional one-tool-scoped endpoint |
-| GET | `/api/ide/bootstrap` | QP Bearer + Premium | Return this user's IDE MCP and bridge endpoints |
-| GET | `/api/ide/status` | QP Bearer + Premium | Live desktop/workspace/MCP session status |
-| GET | `/api/ide/grants` | QP Bearer + Premium | List OAuth clients authorized for this IDE resource |
-| DELETE | `/api/ide/grants/:clientId` | QP Bearer + Premium | Revoke one IDE OAuth client and its tokens |
-| GET | `/.well-known/oauth-protected-resource/ide/mcp/:userId` | — | IDE RFC 9728 protected-resource discovery |
-| POST | `/ide/mcp/:userId` | Resource-bound OAuth + Premium | Streamable HTTP IDE MCP endpoint |
-| WebSocket | `/ide/bridge` | QP Bearer + Premium | Live desktop filesystem/command action bridge |
+| Method    | Endpoint                                                      | Auth                           | Purpose                                                                                                                                                                |
+| --------- | ------------------------------------------------------------- | ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| GET       | `/api/health`                                                 | —                              | Liveness probe                                                                                                                                                         |
+| GET       | `/api/version`                                                | —                              | Running commit, startup time, and effective MCP OAuth lifetimes (no credentials)                                                                                       |
+| GET       | `/api/plans`                                                  | —                              | Plan catalog                                                                                                                                                           |
+| POST      | `/api/auth/signup/start`                                      | —                              | Begin signup, email a code                                                                                                                                             |
+| POST      | `/api/auth/signup/resend`                                     | —                              | Resend the code (throttled)                                                                                                                                            |
+| POST      | `/api/auth/signup/verify`                                     | —                              | Prove the code, create the account                                                                                                                                     |
+| POST      | `/api/auth/login`                                             | —                              | Sign in with username **or** email                                                                                                                                     |
+| POST      | `/api/auth/refresh`                                           | —                              | Rotate refresh token, mint access token                                                                                                                                |
+| POST      | `/api/auth/logout`                                            | —                              | Revoke one session                                                                                                                                                     |
+| POST      | `/api/auth/logout-all`                                        | Bearer                         | Revoke every session                                                                                                                                                   |
+| GET       | `/api/auth/me`                                                | Bearer                         | Identity + authoritative entitlements                                                                                                                                  |
+| POST      | `/api/auth/password`                                          | Bearer                         | Change password, revokes all sessions                                                                                                                                  |
+| POST      | `/api/account/plan`                                           | Bearer                         | Change plan (payment is out of scope)                                                                                                                                  |
+| GET       | `/api/mcp/tools`                                              | QP Bearer + Pro                | Governed Power Platform tool catalog                                                                                                                                   |
+| GET/POST  | `/api/mcp/connections`                                        | QP Bearer + Pro                | List/create tenant-scoped MCP connections                                                                                                                              |
+| DELETE    | `/api/mcp/connections/:id`                                    | QP Bearer + Pro                | Revoke a connection key                                                                                                                                                |
+| DELETE    | `/api/mcp/connections/:id/permanent`                          | QP Bearer + Pro                | Delete the connection record outright. Revoke stops access and keeps the record; this is the separate decision to stop keeping it. Transmission history is unaffected. |
+| GET       | `/api/mcp/analytics`                                          | QP Bearer + Pro                | Stream-aggregate MCP transmission analytics                                                                                                                            |
+| GET       | `/api/mcp/analytics/report`                                   | QP Bearer + Pro                | Export the retained, redacted transmission set with queue/approval/handler timing diagnostics                                                                          |
+| DELETE    | `/api/mcp/analytics?confirm=true`                             | QP Bearer + Pro                | Clear the signed-in user's transmission history in the selected scope                                                                                                  |
+| GET       | `/.well-known/oauth-protected-resource/mcp/:userId/:tenantId` | —                              | RFC 9728 protected-resource discovery                                                                                                                                  |
+| GET       | `/.well-known/oauth-authorization-server`                     | —                              | RFC 8414 authorization-server discovery                                                                                                                                |
+| POST      | `/oauth/register`                                             | —                              | RFC 7591 dynamic registration for public PKCE clients                                                                                                                  |
+| GET/POST  | `/oauth/authorize`                                            | —                              | User sign-in, consent, and authorization-code issuance                                                                                                                 |
+| POST      | `/oauth/token`                                                | —                              | Authorization-code exchange and refresh-token rotation                                                                                                                 |
+| POST      | `/oauth/revoke`                                               | —                              | Revoke an OAuth grant                                                                                                                                                  |
+| POST      | `/mcp/:userId/:tenantId`                                      | OAuth or MCP Bearer            | Stateless Streamable HTTP JSON-RPC endpoint                                                                                                                            |
+| POST      | `/mcp/:userId/:tenantId/:toolName`                            | OAuth or MCP Bearer            | Optional one-tool-scoped endpoint                                                                                                                                      |
+| GET       | `/api/ide/bootstrap`                                          | QP Bearer + Premium            | Return this user's IDE MCP and bridge endpoints                                                                                                                        |
+| GET       | `/api/ide/status`                                             | QP Bearer + Premium            | Live desktop/workspace/MCP session status                                                                                                                              |
+| GET       | `/api/ide/grants`                                             | QP Bearer + Premium            | List OAuth clients authorized for this IDE resource                                                                                                                    |
+| DELETE    | `/api/ide/grants/:clientId`                                   | QP Bearer + Premium            | Revoke one IDE OAuth client and its tokens                                                                                                                             |
+| GET       | `/.well-known/oauth-protected-resource/ide/mcp/:userId`       | —                              | IDE RFC 9728 protected-resource discovery                                                                                                                              |
+| POST      | `/ide/mcp/:userId`                                            | Resource-bound OAuth + Premium | Streamable HTTP IDE MCP endpoint                                                                                                                                       |
+| WebSocket | `/ide/bridge`                                                 | QP Bearer + Premium            | Live desktop filesystem/command action bridge                                                                                                                          |
 
 ## MCP architecture
 
@@ -207,38 +207,38 @@ database.
 
 Every value has a safe default; override with environment variables.
 
-| Variable | Default | Purpose |
-|---|---|---|
-| `QP_BACKEND_HOST` | `127.0.0.1` | Bind address |
-| `QP_BACKEND_PORT` | `4817` | Port |
-| `MONGODB_URI` | unset | MongoDB Atlas connection URI. When set, MongoDB becomes authoritative persistent storage. |
-| `MONGODB_DB_NAME` | `quicker_portal` | Atlas database name. |
-| `MONGODB_MAX_POOL_SIZE` | `10` | Maximum MongoDB connection-pool size per backend process. |
-| `QP_SIGNING_SECRET` | unset | Optional deployment secret used to derive the token-signing key; otherwise the generated key set is stored in MongoDB. |
-| `QP_BACKEND_DATA_DIR` | `./data` | Filesystem fallback for local development/tests and the development mail outbox. |
-| `QP_BACKEND_ALLOWED_ORIGINS` | localhost:5817 | CORS allow-list |
-| `QP_BACKEND_TRUST_PROXY` | unset | Set to `1` only behind a trusted proxy |
-| `QP_ACCESS_TOKEN_TTL_SECONDS` | `900` | Access token lifetime |
-| `QP_REFRESH_TOKEN_TTL_SECONDS` | `2592000` | Refresh token lifetime |
-| `QP_VERIFICATION_STATIC_CODE` | `123456` | Fixed signup code; set to `''` to email a random one. **Must be empty in production.** |
-| `QP_MAIL_TRANSPORT` | `outbox` | `outbox` or `smtp` |
-| `QP_MAIL_FROM` | no-reply@… | Sender address |
-| `QP_SMTP_HOST` / `_PORT` / `_USER` / `_PASS` / `_SECURE` | — | SMTP settings |
-| `QP_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
-| `QP_MCP_PUBLIC_BASE_URL` | request origin | Public HTTPS base used in generated MCP endpoints |
-| `QP_MCP_MAX_PAYLOAD_BYTES` | `10485760` | Maximum desktop result/request payload |
-| `QP_MCP_DESKTOP_TIMEOUT_MS` | `105000` | Maximum wait for desktop execution; long metadata reads still use tool-specific limits |
-| `QP_MCP_OAUTH_AUTHORIZATION_TTL_SECONDS` | `1200` | Pending sign-in/consent lifetime; an expired temporary request is safely rebuilt |
-| `QP_MCP_OAUTH_CODE_TTL_SECONDS` | `300` | One-time authorization-code lifetime |
-| `QP_MCP_OAUTH_ACCESS_TTL_SECONDS` | `900` | Resource-bound MCP access-token lifetime |
-| `QP_MCP_OAUTH_REFRESH_TTL_SECONDS` | `2592000` | Rotating refresh-token lifetime |
-| `QP_MCP_OAUTH_MAX_CLIENTS` | `1000` | Retained dynamic OAuth client limit |
-| `QP_IDE_MCP_ALLOWED_HOSTS` | public MCP host + loopback | Exact Host allow-list for IDE Streamable HTTP |
-| `QP_IDE_MCP_CLIENT_BUDGET_MS` | `60000` | End-to-end MCP client request budget |
-| `QP_IDE_MCP_BRIDGE_RPC_TIMEOUT_MS` | budget minus 12s | Desktop action timeout with response headroom |
-| `QP_IDE_MCP_BRIDGE_PING_TIMEOUT_MS` | `8000` | Desktop liveness probe timeout |
-| `QP_IDE_MCP_MAX_READ_BYTES` | `1048576` | Maximum combined text returned by a read call |
-| `QP_IDE_MCP_MAX_FILE_BYTES` | `5242880` | Maximum individual text file size |
+| Variable                                                 | Default                    | Purpose                                                                                                                |
+| -------------------------------------------------------- | -------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `QP_BACKEND_HOST`                                        | `127.0.0.1`                | Bind address                                                                                                           |
+| `QP_BACKEND_PORT`                                        | `4817`                     | Port                                                                                                                   |
+| `MONGODB_URI`                                            | unset                      | MongoDB Atlas connection URI. When set, MongoDB becomes authoritative persistent storage.                              |
+| `MONGODB_DB_NAME`                                        | `quicker_portal`           | Atlas database name.                                                                                                   |
+| `MONGODB_MAX_POOL_SIZE`                                  | `10`                       | Maximum MongoDB connection-pool size per backend process.                                                              |
+| `QP_SIGNING_SECRET`                                      | unset                      | Optional deployment secret used to derive the token-signing key; otherwise the generated key set is stored in MongoDB. |
+| `QP_BACKEND_DATA_DIR`                                    | `./data`                   | Filesystem fallback for local development/tests and the development mail outbox.                                       |
+| `QP_BACKEND_ALLOWED_ORIGINS`                             | localhost:5817             | CORS allow-list                                                                                                        |
+| `QP_BACKEND_TRUST_PROXY`                                 | unset                      | Set to `1` only behind a trusted proxy                                                                                 |
+| `QP_ACCESS_TOKEN_TTL_SECONDS`                            | `900`                      | Access token lifetime                                                                                                  |
+| `QP_REFRESH_TOKEN_TTL_SECONDS`                           | `2592000`                  | Refresh token lifetime                                                                                                 |
+| `QP_VERIFICATION_STATIC_CODE`                            | `123456`                   | Fixed signup code; set to `''` to email a random one. **Must be empty in production.**                                 |
+| `QP_MAIL_TRANSPORT`                                      | `outbox`                   | `outbox` or `smtp`                                                                                                     |
+| `QP_MAIL_FROM`                                           | no-reply@…                 | Sender address                                                                                                         |
+| `QP_SMTP_HOST` / `_PORT` / `_USER` / `_PASS` / `_SECURE` | —                          | SMTP settings                                                                                                          |
+| `QP_LOG_LEVEL`                                           | `info`                     | `debug`, `info`, `warn`, `error`                                                                                       |
+| `QP_MCP_PUBLIC_BASE_URL`                                 | request origin             | Public HTTPS base used in generated MCP endpoints                                                                      |
+| `QP_MCP_MAX_PAYLOAD_BYTES`                               | `10485760`                 | Maximum desktop result/request payload                                                                                 |
+| `QP_MCP_DESKTOP_TIMEOUT_MS`                              | `105000`                   | Maximum wait for desktop execution; long metadata reads still use tool-specific limits                                 |
+| `QP_MCP_OAUTH_AUTHORIZATION_TTL_SECONDS`                 | `1200`                     | Pending sign-in/consent lifetime; an expired temporary request is safely rebuilt                                       |
+| `QP_MCP_OAUTH_CODE_TTL_SECONDS`                          | `300`                      | One-time authorization-code lifetime                                                                                   |
+| `QP_MCP_OAUTH_ACCESS_TTL_SECONDS`                        | `900`                      | Resource-bound MCP access-token lifetime                                                                               |
+| `QP_MCP_OAUTH_REFRESH_TTL_SECONDS`                       | `2592000`                  | Rotating refresh-token lifetime                                                                                        |
+| `QP_MCP_OAUTH_MAX_CLIENTS`                               | `1000`                     | Retained dynamic OAuth client limit                                                                                    |
+| `QP_IDE_MCP_ALLOWED_HOSTS`                               | public MCP host + loopback | Exact Host allow-list for IDE Streamable HTTP                                                                          |
+| `QP_IDE_MCP_CLIENT_BUDGET_MS`                            | `60000`                    | End-to-end MCP client request budget                                                                                   |
+| `QP_IDE_MCP_BRIDGE_RPC_TIMEOUT_MS`                       | budget minus 12s           | Desktop action timeout with response headroom                                                                          |
+| `QP_IDE_MCP_BRIDGE_PING_TIMEOUT_MS`                      | `8000`                     | Desktop liveness probe timeout                                                                                         |
+| `QP_IDE_MCP_MAX_READ_BYTES`                              | `1048576`                  | Maximum combined text returned by a read call                                                                          |
+| `QP_IDE_MCP_MAX_FILE_BYTES`                              | `5242880`                  | Maximum individual text file size                                                                                      |
 
 ### Verification codes are currently static
 
@@ -274,7 +274,7 @@ grep -h "code is" data/outbox/*.eml | tail -1
 ## Verify the deployed backend version
 
 After pushing this backend repository and waiting for deployment, open
-`https://qp-desktop-backend-1.onrender.com/api/version` (or your own host).
+`https://qpbackend.onrender.com/api/version` (or your own host).
 Compare its `commit` with `git rev-parse HEAD` in the backend checkout **after
 committing**. Render supplies the deployed SHA automatically through
 [`RENDER_GIT_COMMIT`](https://render.com/docs/environment-variables).
