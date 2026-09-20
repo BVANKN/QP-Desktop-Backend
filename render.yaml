@@ -35,7 +35,7 @@ services:
         value: "1"
       # The public origin used to build MCP endpoints and the OAuth issuer.
       - key: QP_MCP_PUBLIC_BASE_URL
-        sync: false
+        value: https://qpbackend.onrender.com
       - key: QP_BACKEND_ALLOWED_ORIGINS
         sync: false
       # MUST be empty in production: a fixed signup code lets anyone verify any

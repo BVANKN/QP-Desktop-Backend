@@ -42,6 +42,10 @@ test('complete Dataverse authoring lifecycles are exposed with correct routing a
 test('model-app creation uses a GUID icon input and source changes are revision bound', () => {
   const create = MCP_TOOL_BY_NAME.get('create_model_app');
   assert.ok(create.inputSchema.properties.webResourceId);
+  assert.ok(create.inputSchema.properties.publisherPrefix);
+  assert.deepEqual(validateSchema(create.inputSchema, { name: 'Test', publisherPrefix: 'test' }), []);
+  assert.match(create.description, /never creates a Dataverse table/i);
+  assert.match(MCP_TOOL_BY_NAME.get('create_table').description, /Do NOT use this tool for model-driven app/i);
   assert.equal(create.argumentEnvelope, undefined, 'app creation arguments must not be hidden in an envelope');
   for (const name of ['patch_model_app_source', 'update_model_app_source', 'patch_model_app_sitemap', 'update_model_app_sitemap']) {
     assert.ok(MCP_TOOL_BY_NAME.get(name).inputSchema.required.includes('expectedRevision'), `${name} must reject stale writes`);
