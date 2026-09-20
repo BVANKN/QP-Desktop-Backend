@@ -49,6 +49,7 @@ export function buildConnectionHealth({ userId, connections, grants, desktopStat
       : desktopStatus(userId, connection.tenantId, connection.environmentId);
     return {
       name: connection.name, kind: connection.kind || 'power-platform', enabled: connection.enabled,
+      executionMode: connection.executionMode || 'verified',
       desktop: { connected: desktop.connected ?? null, lastSeenAt: desktop.lastSeenAt || null,
         environmentMatches: desktop.environmentMatches ?? null, appVersion: desktop.appVersion || null },
       grants: owned.filter(grant => grant.connectionId === connection.id)

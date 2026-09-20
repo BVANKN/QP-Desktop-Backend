@@ -11,6 +11,15 @@ export function normalizeExecutionMode(value, tool) {
   return MODE_SET.has(mode) ? mode : '';
 }
 
+// A mode selected in Quicker Portal belongs to the connection, not to an AI
+// generated tool payload. Verified is the migration default for connections
+// created before this setting existed: it preserves the existing write policy
+// and only adds evidence to reads, which are already non-mutating.
+export function configuredExecutionMode(value) {
+  const mode = String(value || 'verified').trim().toLowerCase();
+  return MODE_SET.has(mode) ? mode : 'verified';
+}
+
 export function executionModeSchema(schema) {
   if (!schema || schema.type !== 'object') return schema;
   const resumable = Array.isArray(schema?.if?.required) && schema.if.required.includes('resumeOperationId');
@@ -21,7 +30,7 @@ export function executionModeSchema(schema) {
       executionMode: {
         type: 'string',
         enum: EXECUTION_MODES,
-        description: 'Policy: simple runs once; verified requires evidence; autonomous safely diagnoses and repairs until verified or blocked. Uncertain writes are reconciled, never replayed.'
+        description: 'Connection mode wins. simple runs once; verified proves results; autonomous repairs until verified or blocked. Uncertain writes are reconciled, never replayed.'
       }
     },
     ...(resumable ? {
@@ -34,8 +43,9 @@ export function executionModeSchema(schema) {
   };
 }
 
-export function splitExecutionArguments(args = {}, tool) {
-  const mode = normalizeExecutionMode(args?.executionMode, tool);
+export function splitExecutionArguments(args = {}, tool, connectionMode) {
+  const requestedMode = normalizeExecutionMode(args?.executionMode, tool);
+  const mode = connectionMode === undefined ? requestedMode : configuredExecutionMode(connectionMode);
   if (!mode) return { mode: '', arguments: args };
   if (!args || typeof args !== 'object' || Array.isArray(args) || !Object.hasOwn(args, 'executionMode')) {
     return { mode, arguments: args || {} };

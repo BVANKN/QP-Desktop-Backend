@@ -28,14 +28,15 @@ async function registerUser(username, planId) {
   return verified.body;
 }
 
-async function createConnection(session, captureMode = 'metadata') {
+async function createConnection(session, captureMode = 'metadata', executionMode = 'verified') {
   const created = await server.call('POST', '/api/mcp/connections', {
     name: 'Automated MCP test',
     tenantId,
     tenantName: 'Test tenant',
     environmentId,
     environmentName: 'Test environment',
-    captureMode
+    captureMode,
+    executionMode
   }, { accessToken: session.accessToken });
   assert.equal(created.status, 201, JSON.stringify(created.body));
   assert.match(created.body.apiKey, /^qpmcp\.mcp_/);
@@ -84,7 +85,8 @@ test('free users cannot create MCP connections', async () => {
 test('Pro users can initialize MCP and discover the governed tool catalog', async () => {
   const session = await registerUser('mcppro', 'pro');
   assert.ok(session.entitlements.includes('mcp.server'));
-  const connection = await createConnection(session);
+  const connection = await createConnection(session, 'metadata', 'autonomous');
+  assert.equal(connection.connection.executionMode, 'autonomous');
 
   const initialized = await mcpCall(session, connection, 'initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'test', version: '1' } });
   assert.equal(initialized.status, 200, JSON.stringify(initialized.body));
@@ -109,6 +111,22 @@ test('Pro users can initialize MCP and discover the governed tool catalog', asyn
   const invalidCursor = await mcpCall(session, connection, 'tools/list', { cursor: 'not-a-valid-cursor' }, 99);
   assert.equal(invalidCursor.status, 200);
   assert.equal(invalidCursor.body.error?.code, -32602);
+
+  const listed = await server.call('GET', '/api/mcp/connections', undefined, { accessToken: session.accessToken });
+  assert.equal(listed.status, 200, JSON.stringify(listed.body));
+  assert.equal(listed.body.connections.find(item => item.id === connection.connection.id)?.executionMode, 'autonomous');
+
+  const updated = await server.call('PUT', `/api/mcp/connections/${connection.connection.id}/execution-mode`, {
+    executionMode: 'simple'
+  }, { accessToken: session.accessToken });
+  assert.equal(updated.status, 200, JSON.stringify(updated.body));
+  assert.equal(updated.body.connection.executionMode, 'simple');
+
+  const invalid = await server.call('PUT', `/api/mcp/connections/${connection.connection.id}/execution-mode`, {
+    executionMode: 'fastest'
+  }, { accessToken: session.accessToken });
+  assert.equal(invalid.status, 400, JSON.stringify(invalid.body));
+  assert.equal(invalid.body.details?.field, 'executionMode');
 });
 
 test('MCP keys are tenant-scoped and invalid keys advertise protected-resource metadata', async () => {
@@ -503,11 +521,12 @@ test('tool validation occurs before dispatch and offline desktop state is explic
 
 test('first tool call waits for the heartbeat, then traverses the environment-scoped broker', async () => {
   const session = await registerUser('mcpbridge', 'pro');
-  const connection = await createConnection(session, 'detailed');
+  const connection = await createConnection(session, 'detailed', 'autonomous');
   const clientInstanceId = 'mcp-test-desktop';
   const pendingCall = mcpCall(session, connection, 'tools/call', {
     name: 'query_records',
-    arguments: { tableLogicalName: 'account', select: ['name', 'accountnumber'], top: 2 }
+    // A client cannot silently weaken the mode selected by the user in QP.
+    arguments: { tableLogicalName: 'account', select: ['name', 'accountnumber'], top: 2, executionMode: 'simple' }
   });
   await new Promise(resolve => setTimeout(resolve, 40));
   const heartbeat = await server.call('POST', '/api/mcp/bridge/heartbeat', {
@@ -530,6 +549,8 @@ test('first tool call waits for the heartbeat, then traverses the environment-sc
   assert.equal(leased.status, 200, JSON.stringify(leased.body));
   assert.equal(leased.body.jobs.length, 1);
   assert.equal(leased.body.jobs[0].action, 'mcpQueryRecords');
+  assert.equal(leased.body.jobs[0].executionMode, 'autonomous');
+  assert.equal(Object.hasOwn(leased.body.jobs[0].arguments, 'executionMode'), false);
 
   const completed = await server.call('POST', `/api/mcp/bridge/jobs/${leased.body.jobs[0].id}/complete`, {
     userId: 'untrusted-user', jobId: 'untrusted-job',

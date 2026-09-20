@@ -4,6 +4,7 @@ import { mongoCollection, mongoEnabled } from '../../lib/mongo.js';
 import { AuthenticationError, NotFoundError, ValidationError } from '../../core/errors.js';
 import { DEVOPS_DEFAULT_POLICY, normalizePolicy } from './tool-policy.js';
 import { normalizeDevOpsGrant } from './devops-grant.js';
+import { EXECUTION_MODES, configuredExecutionMode } from './execution-mode.js';
 
 const store = new JsonStore('mcp/connections.json', { version: 1, connections: [] });
 const MAX_ACTIVE_CONNECTIONS_PER_USER = 20;
@@ -28,6 +29,7 @@ function publicConnection(connection) {
     environmentId: connection.environmentId,
     environmentName: connection.environmentName,
     captureMode: connection.captureMode,
+    executionMode: configuredExecutionMode(connection.executionMode),
     enabled: connection.enabled,
     keyPrefix: connection.keyPrefix,
     // What this connection may reach. Absent on older records, which is why it
@@ -45,6 +47,10 @@ export async function createMcpConnection(userId, input, endpointBase) {
   const environmentId = cleanIdentifier(input.environmentId || tenantId, 'environmentId', 256);
   const name = String(input.name || input.environmentName || 'Quicker Portal MCP').trim().slice(0, 100);
   const captureMode = input.captureMode === 'metadata' ? 'metadata' : 'detailed';
+  const requestedExecutionMode = String(input.executionMode || 'verified').trim().toLowerCase();
+  if (!EXECUTION_MODES.includes(requestedExecutionMode)) {
+    throw new ValidationError('Execution mode must be simple, verified, or autonomous.', { field: 'executionMode' });
+  }
   const id = randomId('mcp');
   const secret = randomToken(32);
   const apiKey = `qpmcp.${id}.${secret}`;
@@ -61,6 +67,7 @@ export async function createMcpConnection(userId, input, endpointBase) {
     environmentName: String(input.environmentName || '').trim().slice(0, 160),
     name,
     captureMode,
+    executionMode: requestedExecutionMode,
     enabled: true,
     keyHash: sha256Hex(apiKey),
     keyPrefix: `${apiKey.slice(0, 18)}...`,
@@ -141,6 +148,7 @@ export async function ensureIdeMcpConnection(userId) {
           environmentName: 'Local workspaces',
           name: 'Quicker Portal IDE',
           captureMode: 'metadata',
+          executionMode: 'verified',
           keyHash: null,
           keyPrefix: null,
           createdAt: now,
@@ -170,6 +178,7 @@ export async function ensureIdeMcpConnection(userId) {
       environmentName: 'Local workspaces',
       name: 'Quicker Portal IDE',
       captureMode: 'metadata',
+      executionMode: 'verified',
       enabled: true,
       keyHash: null,
       keyPrefix: null,
@@ -207,6 +216,7 @@ export function sharePointMcpConnectionSeed(userId, { now = new Date().toISOStri
     environmentName: 'Connected SharePoint site',
     name: 'Quicker Portal SharePoint MCP',
     captureMode: 'metadata',
+    executionMode: 'verified',
     keyHash: null,
     keyPrefix: null,
     createdAt: now,
@@ -254,6 +264,7 @@ export function devOpsMcpConnectionSeed(userId, { now = new Date().toISOString()
     environmentName: 'Azure DevOps',
     name: 'Quicker Portal Azure DevOps MCP',
     captureMode: 'metadata',
+    executionMode: 'verified',
     devopsGrant: { organizations: {} },
     toolPolicy: { ...DEVOPS_DEFAULT_POLICY, subjects: [...DEVOPS_DEFAULT_POLICY.subjects] },
     keyHash: null,
@@ -334,6 +345,7 @@ export async function ensurePowerPagesMcpConnection(userId, input = {}) {
     kind: 'powerpages', userId, tenantId: tenantKey, tenantKey: tenantKey.toLowerCase(),
     sourceTenantId: tenantId, environmentId, environmentKey: environmentId.toLowerCase(),
     name: 'Quicker Portal Power Pages MCP', captureMode: 'metadata', keyHash: null,
+    executionMode: 'verified',
     keyPrefix: null, createdAt: now, lastUsedAt: null
   };
   if (mongoEnabled()) {
@@ -485,6 +497,39 @@ export async function setMcpConnectionToolPolicy(userId, connectionId, policy) {
     const connection = document.connections.find(item => item.id === id && item.userId === userId);
     if (!connection) throw new NotFoundError('MCP connection not found.');
     connection.toolPolicy = toolPolicy;
+    result = publicConnection(connection);
+    return { result };
+  });
+  return result;
+}
+
+/**
+ * Changes how one connection executes every subsequent MCP tool call.
+ *
+ * This is deliberately authoritative over a mode included in an AI-generated
+ * payload. Safety and persistence choices belong to the person in Quicker
+ * Portal; an MCP client must not silently change them for one call.
+ */
+export async function setMcpConnectionExecutionMode(userId, connectionId, value) {
+  const id = cleanIdentifier(connectionId, 'MCP connection ID');
+  const executionMode = String(value || '').trim().toLowerCase();
+  if (!EXECUTION_MODES.includes(executionMode)) {
+    throw new ValidationError('Execution mode must be simple, verified, or autonomous.', { field: 'executionMode' });
+  }
+  if (mongoEnabled()) {
+    const updated = await (await mongoCollection('mcp_connections')).findOneAndUpdate(
+      { id, userId },
+      { $set: { executionMode } },
+      { returnDocument: 'after' }
+    );
+    if (!updated) throw new NotFoundError('MCP connection not found.');
+    return publicConnection(updated);
+  }
+  let result;
+  await store.update(document => {
+    const connection = document.connections.find(item => item.id === id && item.userId === userId);
+    if (!connection) throw new NotFoundError('MCP connection not found.');
+    connection.executionMode = executionMode;
     result = publicConnection(connection);
     return { result };
   });

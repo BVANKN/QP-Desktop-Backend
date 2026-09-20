@@ -14,6 +14,7 @@ import {
   powerPagesMcpConnectionEndpoint,
   deleteMcpConnection,
   setMcpConnectionToolPolicy,
+  setMcpConnectionExecutionMode,
   revokeMcpConnection,
   sharePointMcpConnectionEndpoint
 } from './connections.js';
@@ -365,6 +366,11 @@ export function registerMcpRoutes(router, { ideMcp } = {}) {
     const body = await readJsonBody(ctx);
     const connection = await setMcpConnectionToolPolicy(ctx.auth.sub, ctx.params.connectionId, body?.policy ?? body);
     sendJson(ctx, 200, { ok: true, connection, summary: summarizePolicy(resourceTools(policyResource(connection.kind)), connection.toolPolicy) });
+  });
+  router.put('/api/mcp/connections/:connectionId/execution-mode', authenticate, requireMcpEntitlement, async ctx => {
+    const body = await readJsonBody(ctx);
+    const connection = await setMcpConnectionExecutionMode(ctx.auth.sub, ctx.params.connectionId, body?.executionMode);
+    sendJson(ctx, 200, { ok: true, connection });
   });
   router.post('/api/mcp/tool-policy/preview', authenticate, requireMcpEntitlement, async ctx => {
     const body = await readJsonBody(ctx);

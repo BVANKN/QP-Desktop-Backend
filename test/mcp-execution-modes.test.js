@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 
-import { EXECUTION_MODES, executionModeSchema, normalizeExecutionMode, splitExecutionArguments } from '../src/modules/mcp/execution-mode.js';
+import { EXECUTION_MODES, configuredExecutionMode, executionModeSchema, normalizeExecutionMode, splitExecutionArguments } from '../src/modules/mcp/execution-mode.js';
 import { operationContract, resumableSchema } from '../src/modules/mcp/operation-contract.js';
 import { MCP_TOOL_BY_NAME, MCP_TOOLS, publicTool } from '../src/modules/mcp/tool-catalog.js';
 
@@ -25,6 +25,15 @@ test('execution mode is orchestration metadata and never leaks into desktop argu
   assert.equal(result.mode, 'autonomous');
   assert.equal(Object.hasOwn(result.arguments, 'executionMode'), false);
   assert.equal(result.arguments.workflowId, '00000000-0000-0000-0000-000000000001');
+});
+
+test('the user-selected connection mode is authoritative over a tool payload', () => {
+  const tool = MCP_TOOL_BY_NAME.get('patch_cloud_flow');
+  const result = splitExecutionArguments({ workflowId: '00000000-0000-0000-0000-000000000001', executionMode: 'simple' }, tool, 'autonomous');
+  assert.equal(result.mode, 'autonomous');
+  assert.equal(Object.hasOwn(result.arguments, 'executionMode'), false);
+  assert.equal(configuredExecutionMode(undefined), 'verified');
+  assert.equal(configuredExecutionMode('SIMPLE'), 'simple');
 });
 
 test('resumable tools allow mode propagation without reopening the original mutation payload', () => {
