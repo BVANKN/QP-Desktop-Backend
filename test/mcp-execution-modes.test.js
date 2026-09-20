@@ -120,7 +120,7 @@ test('result-budget overflow never encourages replay of a completed mutation', (
 test('list_tables exposes bounded pagination instead of an unbounded environment inventory', () => {
   const exposed = publicTool(MCP_TOOL_BY_NAME.get('list_tables'));
   assert.equal(exposed.inputSchema.properties.pageSize.minimum, 1);
-  assert.equal(exposed.inputSchema.properties.pageSize.maximum, 500);
+  assert.equal(exposed.inputSchema.properties.pageSize.maximum, 200);
   assert.equal(exposed.inputSchema.properties.cursor.type, 'string');
   assert.equal(exposed.inputSchema.properties.search.type, 'string');
   assert.equal(exposed.inputSchema.properties.customOnly.type, 'boolean');
