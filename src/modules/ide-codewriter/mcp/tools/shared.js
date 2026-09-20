@@ -39,9 +39,9 @@ export function callContext(ctx, extra) {
   const userId = authInfo.extra.userId;
   const clientName = authInfo.extra.clientName || authInfo.clientId;
 
-  // Prefer the transport's session id. A stateless client gets a stable key
-  // derived from its token, so read tracking still works across its calls
-  // without letting two different clients share a session.
+  // Keep transport sessions distinct for activity/cursors. SessionRegistry
+  // separately shares only the full-read authorization ledger across ephemeral
+  // transports for the same authenticated user + OAuth client.
   const sessionKey = ctx.transportSessionId?.() || extra.sessionId || `token:${sha256Hex(authInfo.token).slice(0, 32)}`;
 
   const session = ctx.sessions.get(sessionKey, {

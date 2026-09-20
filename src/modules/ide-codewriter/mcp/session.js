@@ -22,7 +22,7 @@ const SESSION_IDLE_MS = 6 * 60 * 60 * 1000;
  * this session has seen, that write is rejected with an instruction to re-read.
  */
 export class McpSession {
-  constructor(key, { userId, clientId, clientName }) {
+  constructor(key, { userId, clientId, clientName }, readRevisions = new Map()) {
     this.key = key;
     this.userId = userId;
     this.clientId = clientId;
@@ -30,8 +30,13 @@ export class McpSession {
     this.createdAt = Date.now();
     this.lastActiveAt = Date.now();
 
-    /** `workspaceId\npath` -> revision string the client has been shown. */
-    this.readRevisions = new Map();
+    /** `workspaceId\npath` -> revision string this authenticated MCP client has been shown.
+     *
+     * ChatGPT can create a fresh Streamable HTTP transport for each tool call.
+     * The registry therefore supplies a principal-scoped ledger shared by
+     * ephemeral transports belonging to the same authenticated user/client.
+     */
+    this.readRevisions = readRevisions;
 
     /** Paths this session has written, for the activity summary. */
     this.writtenPaths = new Set();
@@ -118,15 +123,18 @@ export class McpSession {
 /**
  * All live MCP sessions.
  *
- * Keyed by the MCP transport session id. The HTTP integration injects that
- * stable id into tool calls so OAuth access-token rotation cannot invalidate
- * the full-read freshness ledger. A token-derived key remains only as a
- * defensive fallback for nonstandard/stateless transports.
+ * Transport sessions remain separate for activity/cursors, but full-read
+ * authorization is shared by authenticated user + OAuth client. Some MCP
+ * clients (including ChatGPT) create a fresh Streamable HTTP transport for
+ * each tool call; tying the ledger to transport identity makes a successful
+ * read disappear before the immediately-following write.
  */
 export class SessionRegistry {
   constructor() {
     /** @type {Map<string, McpSession>} */
     this.sessions = new Map();
+    /** user/client identity -> shared full-read authorization ledger. */
+    this.readLedgers = new Map();
     this.sweepTimer = setInterval(() => this.sweep(), 30 * 60 * 1000);
     if (typeof this.sweepTimer.unref === 'function') this.sweepTimer.unref();
   }
@@ -136,10 +144,24 @@ export class SessionRegistry {
    * @param {{ userId: string, clientId: string, clientName: string }} identity
    * @returns {McpSession}
    */
+  static ledgerKey(identity) {
+    const userId = String(identity?.userId || '');
+    const clientIdentity = String(identity?.clientId || identity?.clientName || 'unknown-client');
+    return `${userId}\n${clientIdentity}`;
+  }
+
   get(key, identity) {
+    const ledgerKey = SessionRegistry.ledgerKey(identity);
+    let ledger = this.readLedgers.get(ledgerKey);
+    if (!ledger) {
+      ledger = { readRevisions: new Map(), lastActiveAt: Date.now() };
+      this.readLedgers.set(ledgerKey, ledger);
+    }
+    ledger.lastActiveAt = Date.now();
+
     let session = this.sessions.get(key);
     if (!session) {
-      session = new McpSession(key, identity);
+      session = new McpSession(key, identity, ledger.readRevisions);
       this.sessions.set(key, session);
       log.info(`New MCP session ${key.slice(0, 12)} for ${identity.clientName}`);
     }
@@ -161,6 +183,9 @@ export class SessionRegistry {
     const cutoff = Date.now() - SESSION_IDLE_MS;
     for (const [key, session] of this.sessions) {
       if (session.lastActiveAt < cutoff) this.sessions.delete(key);
+    }
+    for (const [key, ledger] of this.readLedgers) {
+      if (ledger.lastActiveAt < cutoff) this.readLedgers.delete(key);
     }
   }
 

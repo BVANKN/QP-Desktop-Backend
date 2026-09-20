@@ -320,7 +320,7 @@ export const MCP_TOOLS = Object.freeze([
   ...devOpsTools({ tool, object, string, boolean, array, number }),
   tool('get_power_platform_connection', 'mcpConnectionStatus', 'Check whether the account-scoped MCP endpoint has a live Quicker Portal desktop, which tenant/environment it targets, and how to reconnect it. Call this before a multi-step project build.', object(), { execution: 'server' }),
   tool('environment_overview', 'environmentInsights', 'Summarize tables, flows, solutions, applications, security, and governance signals in the connected environment.'),
-  tool('list_tables', 'tables', 'List Dataverse table metadata in the connected environment.', object({ force: boolean('Bypass the desktop metadata cache.') })),
+  tool('list_tables', 'tables', 'List a bounded, pageable Dataverse table catalog. Use search/customOnly to avoid transferring the full environment inventory.', object({ force: boolean('Bypass the desktop metadata cache.'), search: string('Optional case-insensitive logical/schema/display-name filter.'), customOnly: boolean('Return only custom tables.'), pageSize: number('Maximum tables in this page; defaults to 200.', { minimum: 1, maximum: 500 }), cursor: string('Opaque numeric continuation cursor returned by the previous page.') })),
   tool('get_table', 'tableDetail', 'Get detailed metadata for one Dataverse table.', object({ logicalName: tableName }, ['logicalName'])),
   tool('get_table_schema', 'tableSchemaDetails', 'Get a table schema package including columns, relationships, forms, and views.', object({ logicalName: tableName }, ['logicalName'])),
   tool('list_columns', 'columns', 'List columns for one Dataverse table.', object({ logicalName: tableName }, ['logicalName'])),
