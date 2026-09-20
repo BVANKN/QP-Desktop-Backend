@@ -12,7 +12,7 @@ const desktopHeartbeats = new Map();
 const claimsInFlight = new Map();
 
 function claimedEnvelope(job, leaseToken) {
-  return { id: job.id, userId: job.userId, tenantId: job.tenantId, environmentId: job.environmentId, requestId: job.requestId, toolName: job.toolName, action: job.action, risk: job.risk, arguments: job.arguments, ...(job.grant ? { grant: job.grant } : {}), createdAt: job.createdAt, expiresAt: job.expiresAt, leaseToken };
+  return { id: job.id, userId: job.userId, tenantId: job.tenantId, environmentId: job.environmentId, requestId: job.requestId, toolName: job.toolName, action: job.action, risk: job.risk, executionMode: job.executionMode, arguments: job.arguments, ...(job.grant ? { grant: job.grant } : {}), createdAt: job.createdAt, expiresAt: job.expiresAt, leaseToken };
 }
 
 const JOB_RETENTION_MS = 24 * 60 * 60_000;
@@ -20,8 +20,9 @@ const JOB_RETENTION_MS = 24 * 60 * 60_000;
 // latency. Otherwise a healthy long PAC/Dataverse call can be re-queued while
 // the first desktop execution is still completing.
 const DEFAULT_LEASE_MS = 150_000;
+const UNCERTAIN_RECONCILE_MS = 30 * 60_000;
 const MAX_PENDING_JOBS_PER_USER = 50;
-const TERMINAL_STATUSES = ['completed', 'failed', 'expired', 'outcome_unknown'];
+const TERMINAL_STATUSES = ['completed', 'failed', 'expired', 'expired_unreconciled'];
 
 function prune(document) {
   const cutoff = Date.now() - JOB_RETENTION_MS;
@@ -39,7 +40,7 @@ function desktopJobFailure(job) {
   return error;
 }
 
-export async function enqueueDesktopToolCall({ connection, tool, arguments: args, requestId }) {
+export async function enqueueDesktopToolCall({ connection, tool, arguments: args, requestId, executionMode }) {
   if (Buffer.byteLength(JSON.stringify(args || {})) > 4 * 1024 * 1024) {
     throw new ValidationError('MCP arguments exceed the 4 MiB desktop delivery limit. Use targeted edits or smaller batches.');
   }
@@ -59,6 +60,7 @@ export async function enqueueDesktopToolCall({ connection, tool, arguments: args
     toolName: tool.name,
     action: tool.action,
     risk: tool.risk,
+    executionMode: executionMode || (tool.risk === 'read' ? 'simple' : 'verified'),
     // What an Azure DevOps job may reach, taken from the connection record at
     // the moment the call is made. It travels beside the arguments rather than
     // inside them, so nothing a tool call supplies can widen it, and a grant
@@ -126,7 +128,11 @@ async function claimDesktopJobsOnce({ userId, tenantId, environmentId, clientIns
     const nowIso = new Date(nowMs).toISOString();
     await collection.updateMany(
       { status: 'leased', leaseExpiresAt: { $lte: nowIso } },
-      { $set: { status: 'outcome_unknown', error: 'The desktop lease expired after acceptance. Inspect current state before repeating a mutation.', retentionAt: new Date(nowMs + JOB_RETENTION_MS) } }
+      { $set: { status: 'outcome_unknown', error: 'The desktop lease expired after acceptance. The outcome is uncertain; reconcile current state and keep polling instead of repeating the mutation.', uncertainAt: nowIso, reconcileExpiresAt: new Date(nowMs + UNCERTAIN_RECONCILE_MS).toISOString(), retentionAt: new Date(nowMs + JOB_RETENTION_MS) } }
+    );
+    await collection.updateMany(
+      { status: 'outcome_unknown', reconcileExpiresAt: { $lte: nowIso } },
+      { $set: { status: 'expired_unreconciled', error: 'The accepted desktop operation never returned a terminal result before the reconciliation window ended. Current platform state must be inspected before any retry.', arguments: null, result: null, purgedAt: nowIso, retentionAt: new Date(nowMs + JOB_RETENTION_MS) }, $unset: { leaseHash: '', claimKey: '' } }
     );
     await collection.updateMany(
       { status: 'queued', expiresAt: { $lte: nowIso } },
@@ -183,6 +189,7 @@ async function claimDesktopJobsOnce({ userId, tenantId, environmentId, clientIns
         toolName: secured.toolName,
         action: secured.action,
         risk: secured.risk,
+        executionMode: secured.executionMode,
         arguments: secured.arguments,
         ...(secured.grant ? { grant: secured.grant } : {}),
         createdAt: secured.createdAt,
@@ -203,7 +210,18 @@ async function claimDesktopJobsOnce({ userId, tenantId, environmentId, clientIns
     for (const job of document.jobs) {
       if (job.status === 'leased' && Date.parse(job.leaseExpiresAt || 0) <= nowMs) {
         job.status = 'outcome_unknown';
-        job.error = 'The desktop lease expired after acceptance. Inspect current state before repeating a mutation.';
+        job.error = 'The desktop lease expired after acceptance. The outcome is uncertain; reconcile current state and keep polling instead of repeating the mutation.';
+        job.uncertainAt = new Date(nowMs).toISOString();
+        job.reconcileExpiresAt = new Date(nowMs + UNCERTAIN_RECONCILE_MS).toISOString();
+      }
+      if (job.status === 'outcome_unknown' && Date.parse(job.reconcileExpiresAt || 0) <= nowMs) {
+        job.status = 'expired_unreconciled';
+        job.error = 'The accepted desktop operation never returned a terminal result before the reconciliation window ended. Current platform state must be inspected before any retry.';
+        job.arguments = null;
+        job.result = null;
+        job.leaseHash = null;
+        job.claimKey = null;
+        job.purgedAt = new Date(nowMs).toISOString();
       }
       if (job.status === 'queued' && Date.parse(job.expiresAt) <= nowMs) {
         job.status = 'expired';
@@ -236,6 +254,7 @@ async function claimDesktopJobsOnce({ userId, tenantId, environmentId, clientIns
       toolName: job.toolName,
       action: job.action,
       risk: job.risk,
+      executionMode: job.executionMode,
       arguments: job.arguments,
       ...(job.grant ? { grant: job.grant } : {}),
       createdAt: job.createdAt,
@@ -331,7 +350,7 @@ async function waitForMongoDesktopJob(jobId, timeoutMs, leavePending = false) {
       );
       return snapshot;
     }
-    if (['failed', 'expired'].includes(job.status)) {
+    if (['failed', 'expired', 'expired_unreconciled'].includes(job.status)) {
       const failure = desktopJobFailure(job);
       await collection.updateOne(
         { id: jobId },
@@ -343,25 +362,29 @@ async function waitForMongoDesktopJob(jobId, timeoutMs, leavePending = false) {
   }
 
   if (leavePending) return pendingDesktopOperation(await collection.findOne({ id: jobId }));
-  const timedOut = await collection.findOneAndUpdate(
-    { id: jobId, status: { $nin: ['completed', 'failed'] } },
-    {
-      $set: {
-        status: 'expired',
-        error: 'Timed out waiting for the connected Quicker Portal desktop.',
-        arguments: null,
-        result: null,
-        purgedAt: new Date().toISOString(),
+  const beforeTimeout = await collection.findOne({ id: jobId });
+  if (!beforeTimeout) throw new NotFoundError('MCP job was removed before completion.');
+  if (beforeTimeout.status === 'leased' || beforeTimeout.status === 'outcome_unknown') {
+    const nowIso = new Date().toISOString();
+    const uncertain = await collection.findOneAndUpdate(
+      { id: jobId, status: { $in: ['leased', 'outcome_unknown'] } },
+      { $set: {
+        status: 'outcome_unknown',
+        error: 'Timed out waiting after the desktop accepted the operation. The outcome is uncertain; reconcile before retrying.',
+        uncertainAt: beforeTimeout.uncertainAt || nowIso,
+        reconcileExpiresAt: beforeTimeout.reconcileExpiresAt || new Date(Date.now() + UNCERTAIN_RECONCILE_MS).toISOString(),
         retentionAt: new Date(Date.now() + JOB_RETENTION_MS)
-      }
-    },
+      } },
+      { returnDocument: 'after' }
+    );
+    return pendingDesktopOperation(uncertain || beforeTimeout);
+  }
+  const timedOut = await collection.findOneAndUpdate(
+    { id: jobId, status: 'queued' },
+    { $set: { status: 'expired', error: 'Timed out before the connected Quicker Portal desktop accepted the operation.', arguments: null, result: null, purgedAt: new Date().toISOString(), retentionAt: new Date(Date.now() + JOB_RETENTION_MS) } },
     { returnDocument: 'after' }
   );
-  const finalJob = timedOut || await collection.findOne({ id: jobId });
-  // The status the job expired in is the diagnosis: still `queued` means no
-  // desktop ever claimed it, which is a different fault from one that was
-  // accepted and ran out of time.
-  throw desktopWaitFailure(finalJob, timedOut?.claimedAt ? 'leased' : 'queued');
+  throw desktopWaitFailure(timedOut || beforeTimeout, 'queued');
 }
 
 export async function waitForDesktopJob(jobId, timeoutMs, { leavePending = false } = {}) {
@@ -383,7 +406,7 @@ export async function waitForDesktopJob(jobId, timeoutMs, { leavePending = false
         return { result: snapshot };
       });
     }
-    if (['failed', 'expired'].includes(job.status)) {
+    if (['failed', 'expired', 'expired_unreconciled'].includes(job.status)) {
       const failure = desktopJobFailure(job);
       await store.update(current => {
         const failed = current.jobs.find(item => item.id === jobId);
@@ -399,20 +422,28 @@ export async function waitForDesktopJob(jobId, timeoutMs, { leavePending = false
     await waitForSignal(`job:${jobId}`, version, Math.min(2000, Math.max(1, deadline - Date.now())));
   }
   if (leavePending) return pendingDesktopOperation((await store.read()).jobs.find(item => item.id === jobId));
-  await store.update(document => {
+  const afterTimeout = await store.update(document => {
     const job = document.jobs.find(item => item.id === jobId);
-    if (job && !['completed', 'failed'].includes(job.status)) {
+    if (!job) throw new NotFoundError('MCP job was removed before completion.');
+    if (job.status === 'leased' || job.status === 'outcome_unknown') {
+      const nowMs = Date.now();
+      job.status = 'outcome_unknown';
+      job.error = 'Timed out waiting after the desktop accepted the operation. The outcome is uncertain; reconcile before retrying.';
+      job.uncertainAt ||= new Date(nowMs).toISOString();
+      job.reconcileExpiresAt ||= new Date(nowMs + UNCERTAIN_RECONCILE_MS).toISOString();
+      return { result: structuredClone(job) };
+    }
+    if (job.status === 'queued') {
       job.status = 'expired';
-      job.error = 'Timed out waiting for the connected Quicker Portal desktop.';
+      job.error = 'Timed out before the connected Quicker Portal desktop accepted the operation.';
       job.arguments = null;
       job.result = null;
       job.purgedAt = new Date().toISOString();
     }
-    return {};
+    return { result: structuredClone(job) };
   });
-  const document = await store.read();
-  const timedOutJob = document.jobs.find(item => item.id === jobId);
-  throw desktopWaitFailure(timedOutJob, timedOutJob?.claimedAt ? 'leased' : 'queued');
+  if (afterTimeout?.status === 'outcome_unknown') return pendingDesktopOperation(afterTimeout);
+  throw desktopWaitFailure(afterTimeout, 'queued');
 }
 
 export function heartbeatDesktop({ userId, tenantId, environmentId, environmentName, clientInstanceId, appVersion }) {
@@ -512,7 +543,7 @@ export function desktopWaitFailure(job, phase = 'queued') {
   }
   if (phase === 'leased') {
     return new Error(
-      'The Quicker Portal desktop accepted this tool call but did not finish it in time. It is running and on the right environment, so the request itself is doing more work than the tool allows - narrow it, or retry.'
+      'The Quicker Portal desktop accepted this tool call but did not return a terminal result in time. The outcome may already have changed platform state; reconcile current state before any retry, and narrow the operation if it is still needed.'
     );
   }
   return new Error(
@@ -540,10 +571,10 @@ function pendingDesktopOperation(job) {
   if (!job) throw new NotFoundError('MCP operation not found.');
   // Completion may win in the last polling interval. Return its known outcome.
   if (job.status === 'completed') return job;
-  if (['failed', 'expired'].includes(job.status)) throw desktopJobFailure(job);
+  if (['failed', 'expired', 'expired_unreconciled'].includes(job.status)) throw desktopJobFailure(job);
   const error = new Error('The desktop operation is still pending. Poll its operation ID; do not resubmit the original mutation.');
   error.code = 'MCP_OPERATION_PENDING';
-  error.details = { operationId: job.id, status: job.status, expiresAt: job.expiresAt, pollAfterMs: 2000 };
+  error.details = { operationId: job.id, status: job.status, expiresAt: job.expiresAt, ...(job.reconcileExpiresAt ? { reconcileExpiresAt: job.reconcileExpiresAt } : {}), outcomeUncertain: job.status === 'outcome_unknown', pollAfterMs: job.status === 'outcome_unknown' ? 5000 : 2000 };
   throw error;
 }
 
@@ -556,18 +587,23 @@ export async function getDesktopOperation({ userId, connectionId, operationId, e
       ? await (await mongoCollection('mcp_jobs')).findOne({ id: operationId, userId, connectionId })
       : (await store.read()).jobs.find(item => item.id === operationId && item.userId === userId && item.connectionId === connectionId);
     if (!job || (expectedToolName && job.toolName !== expectedToolName)) throw new NotFoundError('This operation is not available to this MCP connection and tool.');
-    if (!['queued','leased'].includes(job.status) || Date.parse(job.expiresAt) <= Date.now() || Date.now() >= deadline) break;
+    if (!['queued','leased','outcome_unknown'].includes(job.status) || (job.status === 'queued' && Date.parse(job.expiresAt) <= Date.now()) || (job.status === 'outcome_unknown' && Date.parse(job.reconcileExpiresAt || 0) <= Date.now()) || Date.now() >= deadline) break;
     await waitForSignal(`job:${operationId}`,version,Math.min(1000,deadline-Date.now()));
   }
-  const overdue = Date.parse(job.expiresAt) <= Date.now();
-  const status = overdue && job.status === 'leased' ? 'outcome_unknown' : overdue && job.status === 'queued' ? 'expired' : job.status;
+  const nowMs = Date.now();
+  let status = job.status;
+  if (status === 'queued' && Date.parse(job.expiresAt) <= nowMs) status = 'expired';
+  if (status === 'leased' && Date.parse(job.leaseExpiresAt || job.expiresAt) <= nowMs) status = 'outcome_unknown';
+  if (status === 'outcome_unknown' && Date.parse(job.reconcileExpiresAt || 0) <= nowMs) status = 'expired_unreconciled';
   return {
     operationId: job.id, toolName: job.toolName, status,
-    completed: ['completed', 'failed', 'expired'].includes(status),
+    executionMode: job.executionMode || (job.risk === 'read' ? 'simple' : 'verified'),
+    completed: ['completed', 'failed', 'expired', 'expired_unreconciled'].includes(status),
     ...(job.result !== null ? { result: job.result } : {}),
     ...(job.error ? { error: job.error } : {}),
-    ...(status === 'outcome_unknown' ? { guidance: 'The desktop has not returned a final outcome. Inspect current state before retrying a mutation; it may already have succeeded.' } : {}),
+    ...(status === 'outcome_unknown' ? { outcomeUncertain: true, reconcileExpiresAt: job.reconcileExpiresAt || null, guidance: 'The desktop accepted this operation but has not returned a final outcome. Keep polling and reconcile current state before any retry; it may already have succeeded.' } : {}),
+    ...(status === 'expired_unreconciled' ? { outcomeUncertain: true, guidance: 'The reconciliation window ended without a terminal desktop result. Inspect current platform state before considering any retry.' } : {}),
     ...(job.purgedAt ? { resultPurged: true } : {}),
-    pollAfterMs: 2000
+    pollAfterMs: status === 'outcome_unknown' ? 5000 : 2000
   };
 }

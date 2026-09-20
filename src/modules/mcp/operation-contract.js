@@ -27,15 +27,35 @@ export function pollToolFor(resourceKind) {
     : resourceKind === 'powerpages' ? 'get_power_pages_operation' : 'get_power_platform_operation';
 }
 
+
+function durationMs(start, end) {
+  const left = Date.parse(start || '');
+  const right = Date.parse(end || '');
+  return Number.isFinite(left) && Number.isFinite(right) && right >= left ? right - left : null;
+}
+
+function operationTimings(operation) {
+  const result = operation?.result?.result ?? operation?.result;
+  const handlerMs = Number(result?._desktopExecution?.handlerMs ?? operation?.result?.execution?.handlerMs);
+  const timings = {
+    queueMs: durationMs(operation?.createdAt, operation?.claimedAt),
+    totalMs: durationMs(operation?.createdAt, operation?.completedAt),
+    ...(Number.isFinite(handlerMs) && handlerMs >= 0 ? { handlerMs } : {})
+  };
+  return Object.fromEntries(Object.entries(timings).filter(([, value]) => value !== null));
+}
+
 export function operationContract(operation, resourceKind) {
-  const pending = ['queued', 'leased'].includes(operation.status);
+  const pending = ['queued', 'leased', 'outcome_unknown'].includes(operation.status);
   const resumable = RESUMABLE_PLUGIN_TOOLS.has(operation.toolName);
   const raw = operation.result;
-  const failed = ['failed', 'expired'].includes(operation.status) || raw?.ok === false;
+  const failed = ['failed', 'expired', 'expired_unreconciled'].includes(operation.status) || raw?.ok === false;
   const hasOutput = operation.status === 'completed' && !operation.resultPurged && !failed && raw != null;
   const output = hasOutput ? (raw?.ok === true && Object.hasOwn(raw, 'result') ? raw.result : raw) : undefined;
   const guidance = pending
-    ? `Work is still running or awaiting desktop consent. Continue polling in this task using pollTool and pollArguments until terminal; do not end the task or ask the user to say continue merely because polling is needed.${resumable ? ' If the poll tool is unavailable, call resumeTool with resumeArguments only after pollAfterMs.' : ''} Keep approval prompts intact and honor user cancellation. Do not repeat the original request.`
+    ? operation.status === 'outcome_unknown'
+      ? `The desktop accepted this operation but its terminal response is not known yet. Keep polling in this task and reconcile current platform state before any retry. Never repeat the original mutation while its outcome is uncertain.${resumable ? ' If the poll tool is unavailable, call resumeTool with resumeArguments only after pollAfterMs.' : ''}`
+      : `Work is still running or awaiting desktop consent. Continue polling in this task using pollTool and pollArguments until terminal; do not end the task or ask the user to say continue merely because polling is needed.${resumable ? ' If the poll tool is unavailable, call resumeTool with resumeArguments only after pollAfterMs.' : ''} Keep approval prompts intact and honor user cancellation. Do not repeat the original request.`
     : hasOutput
     ? output?.canceled ? 'File selection was canceled. Stop; do not reopen the picker without a new user request.'
       : output?.requiresVerification ? 'The write succeeded but verification is pending. Read output.nextTool with output.nextArguments; preserve the component ID and rollback token. Do not repeat the write or claim deployment is complete.'
@@ -48,9 +68,10 @@ export function operationContract(operation, resourceKind) {
     pending,
     pollTool: pollToolFor(resourceKind),
     pollArguments: { operationId: operation.operationId,waitMs:20000 },
-    ...(pending ? { continuePolling:true, nextAction:'poll', requiresChatReply:false } : {}),
+    ...(pending ? { continuePolling:true, nextAction:'poll', requiresChatReply:false, ...(operation.status === 'outcome_unknown' ? { outcomeUncertain:true, reconcileBeforeRetry:true } : {}) } : {}),
     ...(resumable ? { resumeTool: operation.toolName, resumeArguments: { resumeOperationId: operation.operationId } } : {}),
     ...(hasOutput ? { output } : {}),
+    timings: operationTimings(operation),
     guidance
   };
 }

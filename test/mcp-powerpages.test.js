@@ -115,7 +115,8 @@ test('an unclaimable job names the environment mismatch instead of blaming the d
   // Same environment: the fault is genuinely the request, and it says so.
   heartbeatDesktop({ userId, tenantId, environmentId: 'KNCBHARAT', environmentName: 'KNCBHARAT', clientInstanceId: 'c3' });
   assert.equal(desktopStatus(userId, tenantId, 'KNCBHARAT').connected, true);
-  assert.match(desktopWaitFailure(job, 'leased').message, /accepted this tool call but did not finish/);
+  assert.match(desktopWaitFailure(job, 'leased').message, /accepted this tool call but did not return a terminal result/);
+  assert.match(desktopWaitFailure(job, 'leased').message, /reconcile current state before any retry/);
   assert.match(desktopWaitFailure(job, 'queued').message, /never picked the request up/);
 });
 

@@ -139,7 +139,11 @@ export function createMcpRouter(ctx, { authenticate }) {
         }
       });
 
-      const server = createMcpServer(ctx);
+      // Bind read/write freshness tracking to this transport session itself.
+      // RequestHandlerExtra.sessionId is not guaranteed by every SDK/client
+      // path, and OAuth access tokens can rotate mid-session; using a token
+      // hash as the primary key therefore caused false UNREAD_FILE failures.
+      const server = createMcpServer({ ...ctx, transportSessionId: () => transport.sessionId || '' });
 
       transport.onclose = () => {
         if (transport.sessionId) void closeSession(transport.sessionId);

@@ -71,10 +71,11 @@ test('tool discovery metadata remains within its regression budget', () => {
     // Keep a generous total-growth alarm while the 48 KiB page limit remains
     // the actual transport invariant. Dataverse authoring now includes complete
     // app-source, relationship, component, and privilege lifecycles.
-    // Expanded guided operations intentionally add descriptors; retain the
-    // unchanged per-tool, average, and actual wire-page bounds below.
-    const aggregateBudget = group === 'power-platform' ? 275 * 1024 : 40 * 1024;
-    const averageBudget = group === 'power-platform' ? 1_200 : 1_400;
+    // The shared three-mode execution policy adds one compact enum field to
+    // every tool. Keep the intentional aggregate increase tightly bounded;
+    // the actual transport invariant remains the unchanged 48 KiB page cap.
+    const aggregateBudget = group === 'power-platform' ? 400 * 1024 : 50 * 1024;
+    const averageBudget = group === 'power-platform' ? 1_600 : 1_650;
     assert.ok(totalBytes < aggregateBudget, `${group} MCP catalog regressed to ${totalBytes} bytes.`);
     assert.ok(totalBytes / advertised.length < averageBudget, `${group} average MCP descriptor regressed to ${Math.ceil(totalBytes / advertised.length)} bytes.`);
     assert.ok(largest < 8 * 1024, `An individual ${group} MCP tool descriptor regressed to ${largest} bytes.`);

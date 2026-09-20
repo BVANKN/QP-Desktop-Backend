@@ -31,12 +31,17 @@ test('operation contract exposes final artifact output and distinguishes cancell
   assert.match(complete.guidance, /do not select the file again/);
   const canceled = operationContract({ ...operation, result: { ok: true, result: { canceled: true } } }, 'power-platform');
   assert.match(canceled.guidance, /Stop/);
-  for (const status of ['failed', 'expired', 'outcome_unknown']) {
+  for (const status of ['failed', 'expired']) {
     const result = operationContract({ ...operation, status }, 'power-platform');
     assert.equal(result.output, undefined);
     assert.equal(result.pending, false);
     assert.match(result.guidance, /do not blindly repeat/);
   }
+  const uncertain = operationContract({ ...operation, status: 'outcome_unknown' }, 'power-platform');
+  assert.equal(uncertain.output, undefined);
+  assert.equal(uncertain.pending, true);
+  assert.equal(uncertain.reconcileBeforeRetry, true);
+  assert.match(uncertain.guidance, /reconcile current platform state/i);
   assert.equal(operationContract({ ...operation, resultPurged: true }, 'power-platform').output, undefined);
   for (const status of ['queued', 'leased']) {
     const result = operationContract({ ...operation, status, result: null }, 'power-platform');

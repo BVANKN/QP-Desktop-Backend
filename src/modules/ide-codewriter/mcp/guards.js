@@ -122,7 +122,7 @@ export function validateWrite({ session, workspace, change }) {
   if (!session.hasFreshRead(workspace.id, path, existing.revision)) {
     throw new AppError('UNREAD_FILE', REMINDERS.unreadWrite(path), {
       status: 409,
-      details: { path, currentRevision: existing.revision }
+      details: { path, workspaceId: workspace.id, currentRevision: existing.revision, lastReadRevision: session.lastReadRevision(workspace.id, path), fullReadAuthorized: false }
     });
   }
 
@@ -207,7 +207,7 @@ export function validateDelete({ session, workspace, path: rawPath, baseRevision
   if (!session.hasFreshRead(workspace.id, path, existing.revision)) {
     throw new AppError('UNREAD_FILE', REMINDERS.unreadWrite(path), {
       status: 409,
-      details: { path }
+      details: { path, workspaceId: workspace.id, currentRevision: existing.revision, lastReadRevision: session.lastReadRevision(workspace.id, path), fullReadAuthorized: false }
     });
   }
   return { path, existing };

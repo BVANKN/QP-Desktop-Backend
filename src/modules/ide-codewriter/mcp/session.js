@@ -1,4 +1,5 @@
 import { createLogger } from '../logger.js';
+import { normalizeRelPath } from '../util/paths.js';
 
 const log = createLogger('mcp-session');
 
@@ -47,7 +48,12 @@ export class McpSession {
   }
 
   static readKey(workspaceId, relPath) {
-    return `${workspaceId}\n${relPath}`;
+    // Reads can come back from the desktop with a canonicalised slash/path
+    // representation while the subsequent write uses the caller spelling.
+    // Use one normaliser for the ledger so equivalent safe relative paths map
+    // to the same freshness proof.
+    const canonicalPath = normalizeRelPath(relPath, 'path');
+    return `${String(workspaceId)}\n${canonicalPath}`;
   }
 
   /** Records that we handed this client the given revision of a file. */
@@ -112,10 +118,10 @@ export class McpSession {
 /**
  * All live MCP sessions.
  *
- * Keyed by the transport's session id when the client uses one. A client that
- * runs stateless (no `Mcp-Session-Id`) falls back to a key derived from its
- * access token, which keeps read tracking working across its requests without
- * letting two different clients share state.
+ * Keyed by the MCP transport session id. The HTTP integration injects that
+ * stable id into tool calls so OAuth access-token rotation cannot invalidate
+ * the full-read freshness ledger. A token-derived key remains only as a
+ * defensive fallback for nonstandard/stateless transports.
  */
 export class SessionRegistry {
   constructor() {

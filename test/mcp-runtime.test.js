@@ -9,6 +9,7 @@ useTemporaryDataDir();
 const broker = await import('../src/modules/mcp/broker.js');
 const { MCP_TOOLS, MCP_TOOL_BY_NAME } = await import('../src/modules/mcp/tool-catalog.js');
 const { validateSchema } = await import('../src/modules/mcp/schema-validator.js');
+const { executionModeSchema, splitExecutionArguments } = await import('../src/modules/mcp/execution-mode.js');
 const { RESUMABLE_PLUGIN_TOOLS, operationContract } = await import('../src/modules/mcp/operation-contract.js');
 const { redact } = await import('../src/modules/mcp/analytics.js');
 const connection = { id: 'connection-A', userId: 'user-A', tenantId: 'tenant-A', environmentId: 'env-A' };
@@ -96,7 +97,7 @@ test('desktop completion returns the acknowledged operation result', async () =>
   const source = fs.readFileSync(new URL('../src/modules/mcp/protocol.js', import.meta.url), 'utf8');
   const begin = source.indexOf('async function executeTool('), end = source.indexOf('export async function handleMcpRequest', begin);
   const context = {
-    RESUMABLE_PLUGIN_TOOLS, operationContract,
+    RESUMABLE_PLUGIN_TOOLS, operationContract, executionModeSchema, splitExecutionArguments,
     validateSchema, waitForDesktopReady: async () => ({ connected: true }), randomUUID,
     config: { mcp: { desktopTimeoutMs: 120_000 } },
     enqueueDesktopToolCall: async () => ({ id: 'job' }), waitForDesktopJob: async () => ({ result: { ok: true, result: { id: 'created-once' } } }),

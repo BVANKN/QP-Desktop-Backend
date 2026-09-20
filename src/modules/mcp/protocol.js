@@ -13,6 +13,7 @@ import { recordTransmission } from './analytics.js';
 import { entitlementsForUser } from '../plans/subscription-store.js';
 import { logger } from '../../core/logger.js';
 import { validateSchema } from './schema-validator.js';
+import { executionModeSchema, splitExecutionArguments } from './execution-mode.js';
 import { summarizeDevOpsGrant } from './devops-grant.js';
 
 // Endpoints addressed by user and tenant only, with no environment segment in
@@ -33,6 +34,7 @@ const TOOL_PAGE_MAX_ITEMS = 20;
 const TOOL_PAGE_MAX_BYTES = 48 * 1024;
 const TOOL_CURSOR_PREFIX = 'qp-tools-v1:';
 const toolDescriptors = new WeakMap();
+const MCP_RESULT_MAX_BYTES = 768 * 1024;
 
 function jsonRpcError(id, code, message, data) {
   return { jsonrpc: '2.0', id: id ?? null, error: { code, message, ...(data ? { data } : {}) } };
@@ -122,31 +124,107 @@ function pageTools(toolDefinitions, cursor) {
 
 export { validateSchema } from './schema-validator.js';
 
-function resultContent(value) {
+function verificationState(value, tool) {
+  if (tool?.risk === 'read') return 'read_completed';
+  if (value?.outcomeUnknown === true || value?.outcome_unknown === true) return 'outcome_uncertain';
+  if (value?.verified === true || value?.verification === 'verified') return 'verified';
+  if (value?.verified === false || value?.requiresVerification === true || value?.verification === 'pending') return 'verification_pending';
+  return 'not_proven';
+}
+
+function withExecutionEvidence(value, tool, mode) {
+  if (!tool || !mode) return value;
+  const state = verificationState(value, tool);
+  const evidence = {
+    mode,
+    risk: tool.risk,
+    verification: state,
+    uncertainMutationRule: 'reconcile-before-retry',
+    ...(mode === 'verified' && !['verified', 'read_completed'].includes(state) ? {
+      requiresVerification: true,
+      guidance: state === 'outcome_uncertain'
+        ? 'Do not repeat this mutation. Reconcile the current platform state first.'
+        : 'Do not report this write as verified until a canonical readback or domain verification proves it.'
+    } : {}),
+    ...(mode === 'autonomous' ? {
+      continueAutonomously: !['verified', 'read_completed'].includes(state),
+      guidance: state === 'outcome_uncertain'
+        ? 'Reconcile current state before any repair or retry. Never repeat an uncertain mutation blindly.'
+        : !['verified', 'read_completed'].includes(state)
+        ? 'Diagnose with current-state reads, apply only a safe targeted repair when evidence identifies one, then re-verify. Stop when verified or human action is required.'
+        : 'Verification evidence is sufficient; stop unless the user requested additional work.'
+    } : {})
+  };
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? { ...value, _execution: evidence }
+    : { value, _execution: evidence };
+}
+
+function resultContent(value, { tool, mode } = {}) {
+  const structuredContent = withExecutionEvidence(value && typeof value === 'object' && !Array.isArray(value) ? value : { value }, tool, mode);
+  let compact;
+  try { compact = JSON.stringify(structuredContent); } catch { compact = String(structuredContent); }
+  const estimatedBytes = Buffer.byteLength(compact);
+  if (estimatedBytes > MCP_RESULT_MAX_BYTES) {
+    const mutationCompleted = Boolean(tool && tool.risk !== 'read');
+    const overflow = {
+      code: 'MCP_RESULT_TOO_LARGE',
+      estimatedBytes,
+      maxBytes: MCP_RESULT_MAX_BYTES,
+      resultOmitted: true,
+      ...(mutationCompleted ? {
+        writeSucceeded: true,
+        verification: verificationState(value, tool),
+        retrySafe: false,
+        guidance: 'The mutation completed but its returned evidence exceeded the MCP result budget. Do not repeat the mutation. Read the current platform state with a targeted tool and continue verification from that state.'
+      } : {
+        guidance: 'The read produced more data than the MCP result budget. Use table/search filters, a bounded page size, or a continuation cursor.'
+      })
+    };
+    return {
+      content: [{ type: 'text', text: `${overflow.code}: ${overflow.guidance} (${estimatedBytes} bytes > ${MCP_RESULT_MAX_BYTES} byte budget).` }],
+      structuredContent: overflow,
+      // A representation overflow is an error for a read. For a completed
+      // mutation, surfacing isError=true would invite some MCP clients to
+      // repeat a write that has already happened. Preserve success and force
+      // reconcile/readback instead.
+      isError: !mutationCompleted
+    };
+  }
   let text;
-  try { text = JSON.stringify(value, null, 2); } catch { text = String(value); }
-  if (text.length > 80_000) text = `${text.slice(0, 80_000)}\n…response truncated in text; use structuredContent for the complete result.`;
-  const structuredContent = value && typeof value === 'object' && !Array.isArray(value) ? value : { value };
+  try { text = JSON.stringify(structuredContent, null, 2); } catch { text = String(structuredContent); }
+  if (text.length > 80_000) text = `${text.slice(0, 80_000)}\n…text view truncated; structuredContent remains within the bounded result budget.`;
   return { content: [{ type: 'text', text }], structuredContent, isError: false };
 }
 
 async function executeTool(ctx, connection, tool, args, id, resourceKind = 'power-platform', scopedToolName = '') {
-  const validationErrors = validateSchema(tool.inputSchema, args);
-  const resumeOnly = RESUMABLE_PLUGIN_TOOLS.has(tool.name) && Object.keys(args || {}).length === 1 && typeof args?.resumeOperationId === 'string';
+  const validationErrors = validateSchema(executionModeSchema(tool.inputSchema, tool), args);
+  const resumeOnly = RESUMABLE_PLUGIN_TOOLS.has(tool.name) && typeof args?.resumeOperationId === 'string' && Object.keys(args || {}).every(key => ['resumeOperationId', 'executionMode'].includes(key));
   if (tool.annotations.destructiveHint && !resumeOnly && args?.confirm !== true) validationErrors.push('arguments.confirm must be true after explicit user approval.');
   if (validationErrors.length) return jsonRpcError(id, -32602, 'Invalid tool arguments.', { errors: validationErrors });
 
-  const resume = RESUMABLE_PLUGIN_TOOLS.has(tool.name) && Object.hasOwn(args, 'resumeOperationId');
+  if (tool.quarantined) {
+    return { jsonrpc: '2.0', id, result: {
+      content: [{ type: 'text', text: `MCP_TOOL_QUARANTINED: ${tool.quarantineReason || 'This operation is temporarily blocked pending a safety regression.'}` }],
+      structuredContent: { code: 'MCP_TOOL_QUARANTINED', tool: tool.name, quarantined: true, reason: tool.quarantineReason || 'Safety regression required before execution.' },
+      isError: true
+    } };
+  }
+
+  const split = splitExecutionArguments(args, tool);
+  const executionMode = split.mode;
+  const toolArgs = split.arguments;
+  const resume = RESUMABLE_PLUGIN_TOOLS.has(tool.name) && Object.hasOwn(toolArgs, 'resumeOperationId');
   if (resume || (tool.execution === 'server' && tool.action === 'mcpOperationStatus')) {
     try {
       const operation = await getDesktopOperation({
         userId: connection.userId, connectionId: connection.id,
-        operationId: resume ? args.resumeOperationId : args.operationId,
+        operationId: resume ? toolArgs.resumeOperationId : toolArgs.operationId,
         expectedToolName: resume ? tool.name : scopedToolName && scopedToolName !== tool.name ? scopedToolName : undefined,
-        waitMs: resume ? 0 : args.waitMs
+        waitMs: resume ? 0 : toolArgs.waitMs
       });
-      const result = resultContent(operationContract(operation, resourceKind));
-      result.isError = ['failed', 'expired'].includes(operation.status) || operation.result?.ok === false;
+      const result = resultContent(operationContract(operation, resourceKind), { tool, mode: executionMode });
+      result.isError = ['failed', 'expired', 'expired_unreconciled'].includes(operation.status) || operation.result?.ok === false;
       return { jsonrpc: '2.0', id, result };
     } catch (error) {
       return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: error.message }], isError: true } };
@@ -187,8 +265,8 @@ async function executeTool(ctx, connection, tool, args, id, resourceKind = 'powe
         ? 'The desktop execution channel is ready. Read current Dataverse state before every write and verify created components afterward.'
         : 'Open Quicker Portal, sign in with this Premium account, select this MCP endpoint’s environment, and keep the desktop app running while the AI works.'
     };
-    await recordTransmission({ connection, tool, requestId, arguments: args, result: value, startedAt }).catch(error => logger.warn('MCP audit delivery failed after a known result', { message: error.message }));
-    return { jsonrpc: '2.0', id, result: resultContent(value) };
+    await recordTransmission({ connection, tool, requestId, arguments: toolArgs, result: value, startedAt }).catch(error => logger.warn('MCP audit delivery failed after a known result', { message: error.message }));
+    return { jsonrpc: '2.0', id, result: resultContent(value, { tool, mode: executionMode }) };
   }
   if (!desktop.connected) {
     const mismatch = desktop.environmentMatches === false;
@@ -217,7 +295,7 @@ async function executeTool(ctx, connection, tool, args, id, resourceKind = 'powe
   let executionResult;
   let acceptedJob = false;
   try {
-    const job = await enqueueDesktopToolCall({ connection, tool, arguments: args, requestId });
+    const job = await enqueueDesktopToolCall({ connection, tool, arguments: toolArgs, requestId, executionMode });
     acceptedJob = true;
     // Complete fast calls inline. Long work gets a polling handle before a
     // hosted client's HTTP deadline; the mutation itself is never re-executed.
@@ -231,12 +309,12 @@ async function executeTool(ctx, connection, tool, args, id, resourceKind = 'powe
     }
     const value = executionResult?.result ?? executionResult;
     // The completion endpoint records both inline and deferred outcomes.
-    return { jsonrpc: '2.0', id, result: resultContent(value) };
+    return { jsonrpc: '2.0', id, result: resultContent(value, { tool, mode: executionMode }) };
   } catch (error) {
     if (error.code === 'MCP_OPERATION_PENDING') {
-      return { jsonrpc: '2.0', id, result: resultContent(operationContract({ ...error.details, toolName: tool.name, completed: false }, resourceKind)) };
+      return { jsonrpc: '2.0', id, result: resultContent(operationContract({ ...error.details, toolName: tool.name, completed: false }, resourceKind), { tool, mode: executionMode }) };
     }
-    if (!acceptedJob) await recordTransmission({ connection, tool, requestId, arguments: args, result: executionResult, error, startedAt }).catch(() => {});
+    if (!acceptedJob) await recordTransmission({ connection, tool, requestId, arguments: toolArgs, result: executionResult, error, startedAt }).catch(() => {});
     return { jsonrpc: '2.0', id, result: {
       content: [{ type: 'text', text: error.message || 'Quicker Portal tool execution failed.' }],
       structuredContent: {
@@ -342,7 +420,7 @@ export async function handleMcpRequest(ctx, { scopedToolName, resourceKind = 'po
         : isPowerPages
         ? { name: 'Quicker Portal Power Pages MCP', version: '1.0.0', description: 'Builds and operates Power Pages sites through the selected Quicker Portal desktop environment.' }
         : { name: 'Quicker Portal Power Platform MCP', version: '1.0.0', description: 'Executes Power Platform operations through the user-connected Quicker Portal desktop.' },
-      instructions: CONTINUATION_INSTRUCTIONS + '\n' + (!isDevOps && !isSharePoint && !isPowerPages ? POWER_PLATFORM_AUTHORING + '\n' : '') + "A result with pending=true is accepted work, not success or failure. Poll the returned pollTool with operationId after pollAfterMs; do not resubmit the original mutation. If the status is outcome_unknown, inspect current state before proposing any retry. Report per-item failures and partial/truncated inventory explicitly. For plug-ins use the Dataverse connector, not only IDE build tools: inspect assemblies/types/steps/images, choose or confirm the built artifact once, register or update, save exact steps and images, then read back and verify solution membership. If writeSucceeded=true with verification=pending, read get_plugin_registration by the returned ID; do not repeat the write. Report required user action and exact errors instead of generic manual-registration advice. " + (isDevOps
+      instructions: CONTINUATION_INSTRUCTIONS + '\n' + (!isDevOps && !isSharePoint && !isPowerPages ? POWER_PLATFORM_AUTHORING + '\n' : '') + "Execution modes are server policy, not separate tool catalogs. Reads default to simple; writes and destructive tools default to verified. simple executes the requested operation once; verified requires canonical verification evidence before reporting a write as proven; autonomous keeps using safe current-state reads, diagnosis and targeted repair tools until verification is sufficient or human action is required. Propagate executionMode on follow-up calls. A result with pending=true is accepted work, not success or failure. Poll the returned pollTool with operationId after pollAfterMs; do not resubmit the original mutation. If the status is outcome_unknown, it remains non-terminal during reconciliation: keep polling and inspect current state before any retry. Never auto-repeat a mutation with an uncertain outcome. Report per-item failures and partial/truncated inventory explicitly. For plug-ins use the Dataverse connector, not only IDE build tools: inspect assemblies/types/steps/images, choose or confirm the built artifact once, register or update, save exact steps and images, then read back and verify solution membership. If writeSucceeded=true with verification=pending, read get_plugin_registration by the returned ID; do not repeat the write. Report required user action and exact errors instead of generic manual-registration advice. " + (isDevOps
         ? 'You act as the Microsoft account signed in to the user\'s Quicker Portal desktop, inside the Azure DevOps organizations and projects the user granted to this connection - never more than that account can already do, and never outside the grant. Never ask for personal access tokens, passwords, client IDs or app registrations. Start with list_devops_organizations and list_devops_projects: they return only what is granted, so work only with those. If a call is refused as not granted, tell the user which organization or project to grant in Quicker Portal under Azure DevOps MCP; do not look for a way around it. To answer questions about work, prefer query_devops_work_items with structured filters over hand-written WIQL. Before updating a work item, read it with get_devops_work_item and pass its rev as expectedRevision; if the update reports a conflict, read it again rather than forcing. Azure DevOps has no direct messages: to message someone, find them with search_devops_people and add a comment with add_devops_work_item_comment or add_devops_pull_request_comment, passing them in mentions so they are actually notified. Plain @name text notifies nobody. Pull requests you create are drafts unless the user asks otherwise. Running a pipeline has real effects - deployments, packages, spent minutes - so confirm the exact pipeline and branch with the user first, and never try to pass pipeline variables. Deleting a work item moves it to the recycle bin and requires confirm=true after explicit user approval. Report partial or truncated results, and items withheld outside the grant, explicitly.'
         : isSharePoint
         ? 'The connected Quicker Portal desktop browser session is the only authoritative SharePoint identity and site. Never ask for tenant IDs, client IDs, client secrets, app registrations, Microsoft passwords, cookies, or access tokens. Start with get_sharepoint_connection. Discover current site, drive, list, column, and item IDs before acting. Before changing a list, column, file, or list item, call its exact get/read tool immediately first and use the returned ETag or revision when available; stale writes must be re-read, never forced. For text files use patch_sharepoint_file with the exact SHA-256 revision and targeted anchors returned by read_sharepoint_file; never ask the user to paste the complete file and never reconstruct unchanged content from memory. For list items, send only changed fields using internal column names and the current ETag. Create a list first, then create each requested column with create_sharepoint_column; do not invent internal names or unsupported column types. Column type and internal name are immutable after creation, so create a replacement only after explaining the migration impact. Follow paging links for large libraries and lists. Keep reads bounded. Preview the exact target in your response and use delete tools only after explicit user confirmation. If the desktop or SharePoint session is disconnected, explain that the user must reconnect it in Quicker Portal rather than requesting credentials.'

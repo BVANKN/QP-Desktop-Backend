@@ -3,6 +3,7 @@
 import { extendedTools } from './extended-tools.js';
 import { devOpsTools } from './devops-tools.js';
 import { RESUMABLE_PLUGIN_TOOLS, resumableSchema } from './operation-contract.js';
+import { executionModeSchema, executionPolicyMetadata } from './execution-mode.js';
 const string = description => ({ type: 'string', description });
 const boolean = description => ({ type: 'boolean', description });
 const number = (description, extra = {}) => ({ type: 'number', description, ...extra });
@@ -37,7 +38,9 @@ function tool(name, action, description, inputSchema = object(), options = {}) {
     fixedArguments: options.fixedArguments || undefined,
     argumentEnvelope: options.argumentEnvelope || undefined,
     execution: options.execution || 'connected-desktop',
-    timeoutMs: options.timeoutMs || 55_000
+    timeoutMs: options.timeoutMs || 55_000,
+    quarantined: Boolean(options.quarantined),
+    quarantineReason: options.quarantineReason || ''
   });
 }
 
@@ -321,7 +324,7 @@ export const MCP_TOOLS = Object.freeze([
   tool('get_table', 'tableDetail', 'Get detailed metadata for one Dataverse table.', object({ logicalName: tableName }, ['logicalName'])),
   tool('get_table_schema', 'tableSchemaDetails', 'Get a table schema package including columns, relationships, forms, and views.', object({ logicalName: tableName }, ['logicalName'])),
   tool('list_columns', 'columns', 'List columns for one Dataverse table.', object({ logicalName: tableName }, ['logicalName'])),
-  tool('list_all_columns', 'allColumns', 'List columns across all tables. Prefer list_columns when the table is known.'),
+  tool('list_all_columns', 'mcpAllColumns', 'Return a bounded, pageable column catalog for one table. The previous environment-wide unbounded inventory was removed because large tenants could build tens of thousands of rows and exceed MCP transport limits.', object({ tableLogicalName: tableName, search: string('Optional case-insensitive column logical/schema/display-name filter.'), pageSize: number('Maximum rows in this page.', { minimum: 1, maximum: 500 }), cursor: string('Opaque numeric continuation cursor returned by the previous page.') }, ['tableLogicalName'])),
   tool('get_column', 'columnDetail', 'Get detailed metadata for one Dataverse column.', object({ tableLogicalName: tableName, columnLogicalName: columnName }, ['tableLogicalName', 'columnLogicalName'])),
   tool('get_er_model', 'erDiagramMetadata', 'Get environment-wide Dataverse relationship metadata for ER analysis.'),
   tool('get_component_dependencies', 'componentRelated', 'Get dependencies and related components for a Power Platform component.', object({ componentType: number('Dataverse solution component type.'), objectId: string('Component GUID.') }, ['componentType', 'objectId'])),
@@ -537,7 +540,7 @@ export const MCP_TOOLS = Object.freeze([
   tool('update_model_app_source', 'saveMdaAppSource', 'Complete supported AppModule source-field replacement for import or recovery. This does not pretend exported AppModule.xml is a direct Dataverse row contract.', object({ appModuleId: string('App module GUID.'), expectedRevision: string('Required revision from get_model_app_source.'), configXml: string('Complete ConfigXML, or an empty string to clear it.'), eventHandlers: string('Complete event-handler XML, or an empty string to clear it.'), appGraph: string('Complete appGraph JSON text, or an empty string to clear it.') }, ['appModuleId', 'expectedRevision']), { readOnly: false, idempotent: true, timeoutMs: 120_000 }),
   tool('list_model_app_table_candidates', 'mdaTableCandidates', 'List tables that can be added to a model-driven app.', object({ search: string('Optional table search.'), customOnly: boolean('Limit to custom tables; defaults to true.') })),
   tool('add_model_app_table', 'addMdaTableComponent', 'Add a table to a model-driven app.', object({ appModuleId: string('App module GUID.'), tableLogicalName: tableName, rootComponentBehavior: number('0 include subcomponents, 1 do not include, or 2 include shell only.') }, ['appModuleId', 'tableLogicalName']), { readOnly: false, idempotent: true }),
-  tool('remove_model_app_component', 'removeMdaComponent', 'Remove one appmodulecomponent row after explicit approval.', object({ appModuleId: string('App module GUID.'), componentId: string('App-module component row GUID.'), confirm }, ['appModuleId', 'componentId', 'confirm']), { readOnly: false, destructive: true }),
+  tool('remove_model_app_component', 'removeMdaComponent', 'Remove one model-app component through the supported RemoveAppComponents domain action after explicit approval.', object({ appModuleId: string('App module GUID.'), componentId: string('App-module component row GUID.'), confirm }, ['appModuleId', 'componentId', 'confirm']), { readOnly: false, destructive: true }),
   tool('add_model_app_asset', 'changeMdaAppAsset', 'Add a form, view, dashboard, process, or sitemap to a model-driven app and verify membership.', object({ appModuleId: string('App module GUID.'), kind: appAssetKind, componentId: string('Component GUID.') }, ['appModuleId', 'kind', 'componentId']), { readOnly: false, idempotent: true, fixedArguments: { operation: 'add' } }),
   tool('remove_model_app_asset', 'changeMdaAppAsset', 'Remove a form, view, dashboard, process, or sitemap from a model-driven app after explicit approval and verify the result.', object({ appModuleId: string('App module GUID.'), kind: appAssetKind, componentId: string('Component GUID.'), confirm }, ['appModuleId', 'kind', 'componentId', 'confirm']), { readOnly: false, destructive: true, fixedArguments: { operation: 'remove' } }),
   tool('get_model_app_access', 'mdaAppAccess', 'List security roles and the roles currently assigned to a model-driven app.', object({ appModuleId: string('App module GUID.') }, ['appModuleId'])),
@@ -547,7 +550,7 @@ export const MCP_TOOLS = Object.freeze([
   tool('publish_model_app', 'publishMdaApp', 'Publish a model-driven app.', object({ appModuleId: string('App module GUID.'), confirm: boolean('Confirm publishing this application.') }, ['appModuleId', 'confirm']), { readOnly: false, idempotent: true, timeoutMs: 90_000 }),
   tool('open_model_app', 'openMdaApp', 'Open a model-driven app in the restricted Quicker Portal browser on the connected desktop.', object({ appModuleId: string('App module GUID.'), appUrl: string('Optional known app URL.') }, ['appModuleId']), { readOnly: false }),
 
-  tool('list_web_resources', 'webResources', 'List web resources, with type and managed-state metadata.'),
+  tool('list_web_resources', 'webResources', 'List a bounded page of web resources with server-side search/type filters and a Dataverse continuation link.', object({ search: string('Optional case-insensitive name/display-name/description search.'), type: number('Optional Dataverse web-resource type value.', { minimum: 1, maximum: 12 }), pageSize: number('Rows per page.', { minimum: 1, maximum: 500 }), nextLink: string('Continuation link returned by the previous page. Use it unchanged.') })),
   tool('get_web_resource', 'webResourceDetail', 'Get one web resource including decoded source when supported.', object({ webResourceId: string('Web resource GUID.') }, ['webResourceId'])),
   tool('get_web_resource_usage', 'webResourceUsage', 'Find forms and other components that use a web resource.', object({ webResourceId: string('Web resource GUID.') }, ['webResourceId'])),
   tool('create_web_resource', 'createWebResource', 'Create, optionally solution-scope, publish, and re-read a new text or binary web resource.', object({ name: string('Web resource name including publisher path.'), displayName: string('Display name.'), description: string('Optional description.'), webResourceType, content: string('UTF-8 source or base64 binary content.'), contentEncoding: { type: 'string', enum: ['utf8', 'base64'] }, languageCode: number('Optional language code.'), solutionUniqueName, publish: boolean('Publish after creation; defaults to true.') }, ['name', 'webResourceType', 'content']), { readOnly: false, timeoutMs: 90_000 }),
@@ -566,7 +569,7 @@ export const MCP_TOOLS = Object.freeze([
   tool('list_environment_variables', 'environmentVariables', 'List environment variable definitions, current/default values, and dependencies.'),
   tool('create_environment_variable', 'createEnvironmentVariable', 'Create and verify an environment-variable definition, with an optional current value for non-secret types.', object({ schemaName: string('Publisher-prefixed schema name.'), displayName: string('Display name.'), description: string('Optional description.'), typeValue: { type: 'number', enum: [100000000,100000001,100000002,100000003,100000004,100000005], description: 'String, Number, Boolean, JSON, Data Source, or Secret.' }, defaultValue: string('Optional default value; never use for secrets.'), currentValue: string('Optional current value; never use for secrets.'), valueSchema: string('Required metadata schema for Data Source and Secret types.'), inputControlConfig: string('Optional input-control configuration.'), hint: string('Optional maker hint.'), learnMoreUrl: string('Optional HTTPS help URL.'), isRequired: boolean('Require a deployment value.'), parameterKey: string('Optional parameter key.'), apiId: string('Optional connector API ID.'), connectionReferenceId: string('Optional associated connection-reference GUID.'), secretStore: number('Secret-store value.'), solutionUniqueName }, ['schemaName', 'displayName', 'typeValue']), { readOnly: false }),
   tool('update_environment_variable', 'updateEnvironmentVariable', 'Set or clear an environment variable current value.', object({ definitionId: string('Environment variable definition GUID.'), value: {}, clear: boolean('Clear the current value.') }, ['definitionId']), { readOnly: false, idempotent: true }),
-  tool('set_environment_variable_state', 'setEnvironmentVariableState', 'Activate or deactivate an environment-variable definition.', object({ definitionId: string('Environment-variable definition GUID.'), active: boolean('True to activate.') }, ['definitionId', 'active']), { readOnly: false, idempotent: true }),
+  tool('set_environment_variable_state', 'setEnvironmentVariableState', 'Activate or deactivate an environment-variable definition. Temporarily quarantined from MCP execution until the state-only transition passes the disposable-environment invariant regression.', object({ definitionId: string('Environment-variable definition GUID.'), active: boolean('True to activate.') }, ['definitionId', 'active']), { readOnly: false, idempotent: true, quarantined: true, quarantineReason: 'A live acceptance run observed an unrelated default-value change during a state transition. The exact platform interaction must be proven safe in a disposable environment before MCP execution is re-enabled.' }),
   tool('delete_environment_variable', 'deleteEnvironmentVariable', 'Delete an unmanaged environment-variable definition and its values after explicit approval.', object({ definitionId: string('Environment-variable definition GUID.'), confirm }, ['definitionId', 'confirm']), { readOnly: false, destructive: true }),
 
   tool('list_security_roles', 'roles', 'List Dataverse security roles.'),
@@ -602,7 +605,7 @@ export const MCP_TOOLS = Object.freeze([
   tool('apply_role_privileges', 'applyRolePrivileges', 'Apply and canonically verify table or miscellaneous Dataverse privileges for one role, returning a rollback plan.', object({ roleId: string('Role GUID.'), assignments: array(rolePrivilegeAssignment, 'Exact desired privilege-depth assignments.', { minItems: 1, maxItems: 500 }), continueOnError: boolean('Continue independent privilege changes after an error.'), confirm }, ['roleId', 'assignments', 'confirm']), { readOnly: false, timeoutMs: 120_000 }),
   tool('rollback_role_privileges', 'rollbackRolePrivileges', 'Restore arbitrary role privileges from a rollback plan returned by apply_role_privileges.', object({ rollbackPlan: array(rolePrivilegeRollbackItem, 'Rollback entries returned by the apply tool.', { minItems: 1, maxItems: 500 }), continueOnError: boolean('Continue rollback after an independent error.'), confirm }, ['rollbackPlan', 'confirm']), { readOnly: false, destructive: true, timeoutMs: 120_000 }),
 
-  tool('list_plugin_registrations', 'pluginRegistrationCatalog', 'List plug-in assemblies, types, steps, images and support catalogs. assemblyId scopes assemblies/types/steps/images. health reports inventory completeness, not runtime correctness. Never infer absence from an incomplete collection.', object({ assemblyId: string('Optional assembly GUID for scoped deployment verification.') })),
+  tool('list_plugin_registrations', 'pluginRegistrationCatalog', 'List plug-in registration catalogs. Prefer purpose for targeted choice loading; use inventory only when a complete cross-family audit is actually needed. assemblyId additionally scopes assemblies/types/steps/images. health reports inventory completeness, not runtime correctness. Never infer absence from an incomplete collection.', object({ assemblyId: string('Optional assembly GUID for scoped deployment verification.'), purpose: { type: 'string', enum: ['inventory', 'register', 'updateAssembly', 'webhook', 'image', 'step'], description: 'Targeted catalog purpose. Non-inventory purposes skip unrelated Dataverse collections and are substantially faster.' } })),
   tool('get_plugin_registration', 'pluginRegistrationDetail', 'Read one existing assembly, package, step or image after registration or pending verification. Does not repeat the write; omits binary content and configuration secrets.', object({ kind: { type: 'string', enum: ['assembly', 'package', 'step', 'image'] }, id: string('Existing registration GUID.') }, ['kind', 'id'])),
   tool('save_plugin_step_image', 'savePluginStepImage', 'Create or update a step pre/post image with validation and rollback. Inspect the current step first. Specify exact image alias and required columns from the plug-in source. If verification is pending, read the returned component ID; do not repeat the write.', object({ imageId: string('Existing image GUID when updating.'), stepId: string('Owning SDK step GUID.'), name: string('Image name.'), entityAlias: string('Exact alias expected by the plug-in.'), imageType: { type: 'integer', enum: [0, 1, 2], description: '0 pre-image, 1 post-image, 2 both.' }, attributes: string('Explicit comma-separated column logical names; all-columns images are not accepted.'), messagePropertyName: string('Message parameter, normally Target for Create/Update/Delete.'), description: string('Optional description.'), solutionUniqueName, confirm }, ['stepId', 'name', 'entityAlias', 'imageType', 'attributes', 'confirm']), { readOnly: false, timeoutMs: 120_000 }),
   tool('rollback_plugin_registration', 'rollbackPluginRegistration', 'Apply a specific environment-bound registration rollback token after reviewing the affected components and explicit confirmation. This can remove a newly registered component; never use it as an automatic retry.', object({ rollbackToken: string('Rollback token from a registration operation.'), confirm }, ['rollbackToken', 'confirm']), { readOnly: false, destructive: true, timeoutMs: 120_000 }),
@@ -867,7 +870,7 @@ export function publicTool(toolDefinition) {
   return {
     name: toolDefinition.name,
     description: toolDefinition.description,
-    inputSchema: toolDefinition.inputSchema,
+    inputSchema: executionModeSchema(toolDefinition.inputSchema, toolDefinition),
     annotations: toolDefinition.annotations,
     securitySchemes,
     _meta: {
@@ -877,7 +880,9 @@ export function publicTool(toolDefinition) {
       'quickerportal/action': toolDefinition.action,
       'quickerportal/resource': toolDefinition.group,
       'quickerportal/risk': toolDefinition.risk,
-      'quickerportal/execution': toolDefinition.execution
+      'quickerportal/execution': toolDefinition.execution,
+      'quickerportal/executionPolicy': executionPolicyMetadata(toolDefinition),
+      ...(toolDefinition.quarantined ? { 'quickerportal/quarantined': true, 'quickerportal/quarantineReason': toolDefinition.quarantineReason } : {})
     }
   };
 }
