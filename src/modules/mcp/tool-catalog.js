@@ -517,7 +517,7 @@ export const MCP_TOOLS = Object.freeze([
   tool('complete_business_process_flow_creation', 'completeBusinessProcessFlowCreation', 'Read-only verification after a designer handoff. Checks the saved BPF unique name, table, planned stages/steps and solution membership. Does not activate or create anything; repeat this read after correcting the existing flow.', object({ handoffToken: string('Environment-bound token from create_business_process_flow designer mode.') }, ['handoffToken'])),
   tool('list_table_business_process_flows', 'businessProcessFlowsForTable', 'List BPFs using one table as primary or participating, with runtime selection order.', object({ tableLogicalName: tableName }, ['tableLogicalName'])),
   tool('get_business_process_flow', 'businessProcessFlowDefinition', 'Read a BPF: metadata, a structural summary of its stages and steps, generated stage rows, app membership, form mappings, revision, and ETag. XAML and clientdata are omitted unless include asks for them. Call this before every edit and use the revision it returns.', object({ workflowId: bpfWorkflowId, include: bpfInclude }, ['workflowId'])),
-  tool('create_business_process_flow', 'createBusinessProcessFlow', 'Create using one of three explicit routes: designer handoff (works with no existing BPF; user interaction required), a discovered category-4/type-3 template, or a complete validated artifact pair for import/recovery. Designer mode opens the correct solution and preserves a stage/step plan; opening it is not creation success. Resume with complete_business_process_flow_creation after the user saves. Never invent XAML or ask the user to supply it.', { ...object({
+  tool('create_business_process_flow', 'createBusinessProcessFlow', 'Create using one of three explicit routes: designer handoff (works with no existing BPF; user interaction required), a discovered category-4/type-3 template, or a complete validated artifact pair for import/recovery. Designer mode opens the correct solution and preserves a stage/step plan; opening it is not creation success. A transient IsBusinessProcessEnabled=false metadata read must not block designer handoff: the desktop force-refreshes/cross-checks current BPF evidence and lets Maker handle table enablement if needed. Resume with complete_business_process_flow_creation after the user saves. Never invent XAML or ask the user to supply it.', { ...object({
     name: string('BPF display name.'),
     authoringMode: { type: 'string', enum: ['designer'], description: 'Supported first-BPF route. Requires primaryTable, uniqueName and solutionUniqueName; no template or XML needed. Requires designer interaction, not unattended creation.' },
     stages: array(object({ name: string('Stage display name.'), steps: array(object({ name: string('Step label.'), column: tableName, required: boolean('Whether the column is required to advance.') }, ['name', 'column']), 'Ordered steps on the primary table.', { maxItems: 30 }) }, ['name', 'steps']), 'Optional exact stage/step plan to show and verify after designer creation.', { minItems: 1, maxItems: 30 }),
@@ -1009,15 +1009,21 @@ export const MCP_TOOLS = Object.freeze([
 
 export const MCP_TOOL_BY_NAME = new Map(MCP_TOOLS.map(item => [item.name, item]));
 
-export function publicTool(toolDefinition) {
+export function publicTool(toolDefinition, { includeExecutionMode = true, fixedExecutionMode = '' } = {}) {
   const securitySchemes = [{
     type: 'oauth2',
     scopes: [toolDefinition.annotations.readOnlyHint ? 'mcp:read' : 'mcp:write']
   }];
+  const resolvedFixedMode = fixedExecutionMode === 'automatic'
+    ? (toolDefinition.risk === 'read' ? 'simple' : 'verified')
+    : (fixedExecutionMode || 'verified');
+  const executionPolicy = includeExecutionMode
+    ? executionPolicyMetadata(toolDefinition)
+    : { supportedModes: [resolvedFixedMode], fixedMode: resolvedFixedMode, policy: fixedExecutionMode === 'automatic' ? 'risk-aware' : 'fixed', uncertainMutationRule: 'reconcile-before-retry' };
   return {
     name: toolDefinition.name,
     description: toolDefinition.description,
-    inputSchema: executionModeSchema(toolDefinition.inputSchema, toolDefinition),
+    inputSchema: includeExecutionMode ? executionModeSchema(toolDefinition.inputSchema, toolDefinition) : toolDefinition.inputSchema,
     annotations: toolDefinition.annotations,
     securitySchemes,
     _meta: {
@@ -1028,7 +1034,7 @@ export function publicTool(toolDefinition) {
       'quickerportal/resource': toolDefinition.group,
       'quickerportal/risk': toolDefinition.risk,
       'quickerportal/execution': toolDefinition.execution,
-      'quickerportal/executionPolicy': executionPolicyMetadata(toolDefinition),
+      'quickerportal/executionPolicy': executionPolicy,
       ...(toolDefinition.quarantined ? { 'quickerportal/quarantined': true, 'quickerportal/quarantineReason': toolDefinition.quarantineReason } : {})
     }
   };

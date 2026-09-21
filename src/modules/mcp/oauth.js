@@ -94,19 +94,20 @@ function normalizeResource(value, serviceBaseUrl) {
   const sharePointResource = segments.length === 3 && segments[0] === 'sharepoint' && segments[1] === 'mcp';
   const devOpsResource = segments.length === 3 && segments[0] === 'devops' && segments[1] === 'mcp';
   const powerPagesResource = segments.length === 4 && segments[0] === 'powerpages' && segments[1] === 'mcp';
+  const gatewayResource = (segments.length === 4 || segments.length === 5) && segments[0] === 'gateway' && segments[1] === 'mcp';
   const powerPlatformResource = segments.length >= 3 && segments[0] === 'mcp';
-  if (!ideResource && !sharePointResource && !devOpsResource && !powerPagesResource && !powerPlatformResource) {
+  if (!ideResource && !sharePointResource && !devOpsResource && !powerPagesResource && !gatewayResource && !powerPlatformResource) {
     throw new OAuthError('invalid_target', 'The MCP resource path is invalid.');
   }
-  const userId = cleanText(ideResource || sharePointResource || devOpsResource || powerPagesResource ? segments[2] : segments[1], 128);
-  const tenantId = cleanText(ideResource ? 'ide' : sharePointResource ? 'sharepoint' : devOpsResource ? 'devops' : powerPagesResource ? `powerpages:${segments[3]}` : segments[2], 128);
+  const userId = cleanText(ideResource || sharePointResource || devOpsResource || powerPagesResource || gatewayResource ? segments[2] : segments[1], 128);
+  const tenantId = cleanText(ideResource ? 'ide' : sharePointResource ? 'sharepoint' : devOpsResource ? 'devops' : powerPagesResource ? `powerpages:${segments[3]}` : gatewayResource ? segments[3] : segments[2], 128);
   if (!userId || !tenantId) throw new OAuthError('invalid_target', 'The MCP resource scope is incomplete.');
   resource.searchParams.sort();
   return {
     resource: resource.toString(),
     userId,
     tenantId,
-    kind: ideResource ? 'ide' : sharePointResource ? 'sharepoint' : devOpsResource ? 'devops' : powerPagesResource ? 'powerpages' : 'power-platform',
+    kind: ideResource ? 'ide' : sharePointResource ? 'sharepoint' : devOpsResource ? 'devops' : powerPagesResource ? 'powerpages' : gatewayResource ? 'gateway' : 'power-platform',
     connectionId: cleanText(resource.searchParams.get('connection_id'), 128)
   };
 }

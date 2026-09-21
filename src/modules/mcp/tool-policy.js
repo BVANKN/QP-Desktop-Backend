@@ -54,6 +54,7 @@ export const SUBJECTS = Object.freeze([
 /** The subjects a connection of this resource can be granted. */
 export function subjectsForResource(resource = 'power-platform') {
   const wanted = String(resource || 'power-platform');
+  if (wanted === 'gateway') return SUBJECTS;
   return SUBJECTS.filter(subject => (subject.resource || 'power-platform') === wanted || subject.id === 'diagnostics');
 }
 

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { config } from '../../config/config.js';
 import { readJsonBody } from '../../core/http/context.js';
-import { authenticateMcpConnection } from './connections.js';
+import { authenticateMcpConnection, findActiveMcpConnectionByKind } from './connections.js';
 import { authenticateMcpOAuthToken, OAuthError } from './oauth.js';
 import { mcpAuthFailure } from './auth-failure.js';
 import { MCP_TOOLS, MCP_TOOL_BY_NAME, publicTool } from './tool-catalog.js';
@@ -15,6 +15,7 @@ import { logger } from '../../core/logger.js';
 import { validateSchema } from './schema-validator.js';
 import { configuredExecutionMode, executionModeSchema, splitExecutionArguments } from './execution-mode.js';
 import { summarizeDevOpsGrant } from './devops-grant.js';
+import { gatewayToolsForScope, normalizeGatewayDomains, normalizeGatewayPacks } from './gateway-taxonomy.js';
 
 // Endpoints addressed by user and tenant only, with no environment segment in
 // the URL. For these the environment is whatever the desktop is on, not
@@ -33,7 +34,8 @@ const INITIAL_OAUTH_SCOPES = 'mcp:read mcp:write offline_access';
 const TOOL_PAGE_MAX_ITEMS = 20;
 const TOOL_PAGE_MAX_BYTES = 48 * 1024;
 const TOOL_CURSOR_PREFIX = 'qp-tools-v1:';
-const toolDescriptors = new WeakMap();
+const toolDescriptorsWithMode = new WeakMap();
+const toolDescriptorsFixedMode = new WeakMap();
 const MCP_RESULT_MAX_BYTES = 768 * 1024;
 
 function jsonRpcError(id, code, message, data) {
@@ -92,19 +94,20 @@ function parseToolCursor(value, total) {
   return Number.isSafeInteger(offset) && offset >= 0 && offset < total ? offset : -1;
 }
 
-function pageTools(toolDefinitions, cursor) {
+function pageTools(toolDefinitions, cursor, { includeExecutionMode = true, fixedExecutionMode = 'verified' } = {}) {
   const start = parseToolCursor(cursor, toolDefinitions.length);
   if (start < 0) return null;
 
   const tools = [];
   let estimatedBytes = 0;
+  const descriptorCache = includeExecutionMode ? toolDescriptorsWithMode : toolDescriptorsFixedMode;
   for (let index = start; index < toolDefinitions.length && tools.length < TOOL_PAGE_MAX_ITEMS; index += 1) {
     const definition = toolDefinitions[index];
-    let descriptor = toolDescriptors.get(definition);
+    let descriptor = descriptorCache.get(definition);
     if (!descriptor) {
-      const exposed = publicTool(definition);
+      const exposed = publicTool(definition, { includeExecutionMode, fixedExecutionMode });
       descriptor = { exposed, bytes: Buffer.byteLength(JSON.stringify(exposed)) };
-      toolDescriptors.set(definition, descriptor);
+      descriptorCache.set(definition, descriptor);
     }
     const { exposed, bytes: toolBytes } = descriptor;
     // Always return at least one tool, even if a future individual descriptor
@@ -197,8 +200,8 @@ function resultContent(value, { tool, mode } = {}) {
   return { content: [{ type: 'text', text }], structuredContent, isError: false };
 }
 
-async function executeTool(ctx, connection, tool, args, id, resourceKind = 'power-platform', scopedToolName = '') {
-  const expectedInputSchema = executionModeSchema(tool.inputSchema, tool);
+async function executeTool(ctx, connection, tool, args, id, resourceKind = 'power-platform', scopedToolName = '', { allowExecutionMode = true } = {}) {
+  const expectedInputSchema = allowExecutionMode ? executionModeSchema(tool.inputSchema, tool) : tool.inputSchema;
   const validationErrors = validateSchema(expectedInputSchema, args);
   const resumeOnly = RESUMABLE_PLUGIN_TOOLS.has(tool.name) && typeof args?.resumeOperationId === 'string' && Object.keys(args || {}).every(key => ['resumeOperationId', 'executionMode'].includes(key));
   if (tool.annotations.destructiveHint && !resumeOnly && args?.confirm !== true) validationErrors.push('arguments.confirm must be true after explicit user approval.');
@@ -216,7 +219,9 @@ async function executeTool(ctx, connection, tool, args, id, resourceKind = 'powe
     } };
   }
 
-  const split = splitExecutionArguments(args, tool, configuredExecutionMode(connection.executionMode));
+  const split = allowExecutionMode
+    ? splitExecutionArguments(args, tool, configuredExecutionMode(connection.executionMode))
+    : { mode: tool.risk === 'read' ? 'simple' : 'verified', arguments: Object.fromEntries(Object.entries(args || {}).filter(([key]) => key !== 'executionMode')) };
   const executionMode = split.mode;
   const toolArgs = split.arguments;
   const resume = RESUMABLE_PLUGIN_TOOLS.has(tool.name) && Object.hasOwn(toolArgs, 'resumeOperationId');
@@ -332,6 +337,40 @@ async function executeTool(ctx, connection, tool, args, id, resourceKind = 'powe
   }
 }
 
+async function gatewayExecutionConnection(connection, tool) {
+  if ((connection.kind || '') !== 'gateway') return { connection, resourceKind: tool.group || 'power-platform' };
+  const group = tool.group || 'power-platform';
+  if (group === 'power-platform') return { connection: { ...connection, kind: 'power-platform' }, resourceKind: group };
+  if (group === 'sharepoint') return { connection: { ...connection, kind: 'sharepoint', tenantId: 'sharepoint', tenantKey: 'sharepoint', environmentId: 'sharepoint', environmentKey: 'sharepoint', environmentName: 'Connected SharePoint site' }, resourceKind: group };
+  if (group === 'powerpages') {
+    const sourceTenantId = String(connection.tenantId || '').replace(/^powerpages:/, '');
+    const tenantId = `powerpages:${sourceTenantId}`;
+    return { connection: { ...connection, kind: 'powerpages', sourceTenantId, tenantId, tenantKey: tenantId.toLowerCase() }, resourceKind: group };
+  }
+  if (group === 'devops') {
+    const devops = await findActiveMcpConnectionByKind(connection.userId, 'devops');
+    return { connection: { ...connection, kind: 'devops', tenantId: 'devops', tenantKey: 'devops', environmentId: 'devops', environmentKey: 'devops', environmentName: 'Azure DevOps', devopsGrant: devops?.devopsGrant || { organizations: {} }, toolPolicy: connection.toolPolicy }, resourceKind: group };
+  }
+  return { connection, resourceKind: group };
+}
+
+function toolsInScopeForConnection(connection, resourceKind) {
+  let scoped;
+  if (resourceKind === 'gateway') {
+    const domains = normalizeGatewayDomains(connection.gatewayDomains);
+    const packs = normalizeGatewayPacks(connection.gatewayPacks, domains);
+    scoped = gatewayToolsForScope(MCP_TOOLS, domains, packs, connection.toolAllowlist);
+  } else {
+    scoped = MCP_TOOLS.filter(tool => tool.group === resourceKind);
+    if (Array.isArray(connection.toolAllowlist)) scoped = scoped.filter(tool => connection.toolAllowlist.includes(tool.name));
+  }
+  return scoped;
+}
+
+function toolsForConnection(connection, resourceKind) {
+  return toolsInScopeForConnection(connection, resourceKind).filter(tool => toolAllowed(tool, connection.toolPolicy).allowed);
+}
+
 export async function handleMcpRequest(ctx, { scopedToolName, resourceKind = 'power-platform' } = {}) {
   if (!validateOrigin(ctx)) {
     return sendMcpJson(ctx, 403, jsonRpcError(null, -32000, 'Origin is not allowed.'));
@@ -341,7 +380,7 @@ export async function handleMcpRequest(ctx, { scopedToolName, resourceKind = 'po
   try {
     const endpointTenantId = resourceKind === 'sharepoint' ? 'sharepoint' : resourceKind === 'devops' ? 'devops' : resourceKind === 'powerpages' ? `powerpages:${ctx.params.tenantId}` : ctx.params.tenantId;
     const authorization = String(ctx.req.headers.authorization || '');
-    connection = resourceKind === 'power-platform' && authorization.startsWith('Bearer qpmcp.')
+    connection = ['power-platform', 'gateway'].includes(resourceKind) && authorization.startsWith('Bearer qpmcp.')
       ? await authenticateMcpConnection({ userId: ctx.params.userId, tenantId: endpointTenantId, authorization })
       : await authenticateMcpOAuthToken({ authorization, resource: requestResourceUrl(ctx) });
     if (connection.userId !== ctx.params.userId || connection.tenantId.toLowerCase() !== String(endpointTenantId).toLowerCase()) {
@@ -402,7 +441,19 @@ export async function handleMcpRequest(ctx, { scopedToolName, resourceKind = 'po
   // a tool does not plan around it, propose it, or ask the user to enable
   // something mid-task. Refusing at call time alone would leave it doing all
   // three.
-  const resourceTools = MCP_TOOLS.filter(tool => tool.group === resourceKind && toolAllowed(tool, connection.toolPolicy).allowed);
+  const resourceTools = toolsForConnection(connection, resourceKind);
+  const scopedResourceTools = toolsInScopeForConnection(connection, resourceKind);
+  const isGateway = resourceKind === 'gateway';
+  const fixedCategoryMode = (isGateway && Array.isArray(connection.gatewayDomains) && connection.gatewayDomains.length === 1) || ['sharepoint', 'powerpages', 'devops'].includes(resourceKind);
+  const allowExecutionMode = !fixedCategoryMode;
+  if (isGateway && ctx.params.domain) {
+    const endpointDomain = String(ctx.params.domain || '').trim().toLowerCase();
+    if (!fixedCategoryMode || connection.gatewayDomains[0] !== endpointDomain) {
+      return sendMcpJson(ctx, 401, jsonRpcError(null, -32001, 'The access token is not valid for this scoped MCP category endpoint.'), {
+        'WWW-Authenticate': `Bearer realm="quicker-portal-mcp", error="invalid_token", resource_metadata="${resourceMetadataUrl(ctx)}", scope="${INITIAL_OAUTH_SCOPES}"`
+      });
+    }
+  }
   const isSharePoint = resourceKind === 'sharepoint';
   const isPowerPages = resourceKind === 'powerpages';
   const isDevOps = resourceKind === 'devops';
@@ -413,19 +464,25 @@ export async function handleMcpRequest(ctx, { scopedToolName, resourceKind = 'po
     logger.info('MCP client initialized.', {
       protocolVersion: requested,
       clientName: String(body.params?.clientInfo?.name || 'unknown').slice(0, 80),
-      requestIdHeader: ctx.requestId
+      requestIdHeader: ctx.requestId,
+      resourceKind,
+      gatewayDomains: isGateway ? connection.gatewayDomains : undefined,
+      gatewayPacks: isGateway ? connection.gatewayPacks : undefined,
+      toolAllowlistCount: Array.isArray(connection.toolAllowlist) ? connection.toolAllowlist.length : undefined
     });
     return sendMcpJson(ctx, 200, { jsonrpc: '2.0', id: body.id, result: {
       protocolVersion: requested,
       capabilities: { tools: { listChanged: false }, resources: { subscribe: false, listChanged: false } },
-      serverInfo: isDevOps
+      serverInfo: isGateway
+        ? { name: connection.gatewayDomains?.length === 1 ? `Quicker Portal ${connection.gatewayDomains[0]} MCP` : 'Quicker Portal MCP Gateway', version: '1.0.0', description: connection.gatewayDomains?.length === 1 ? `Category-scoped endpoint exposing only ${connection.gatewayDomains[0]} tools${connection.gatewayPacks?.[connection.gatewayDomains[0]] ? ` from capability packs: ${connection.gatewayPacks[connection.gatewayDomains[0]].join(', ')}` : ''}.` : `Combined endpoint exposing only the selected categories: ${(connection.gatewayDomains || []).join(', ')}${connection.gatewayPacks?.dataverse ? `; Dataverse packs: ${connection.gatewayPacks.dataverse.join(', ')}` : ''}.` }
+        : isDevOps
         ? { name: 'Quicker Portal Azure DevOps MCP', version: '1.0.0', description: 'Reads and updates Azure DevOps work items, comments, repositories, pull requests, pipelines and wikis in the organizations and projects the user granted, as the Microsoft account signed in to their Quicker Portal desktop.' }
         : isSharePoint
         ? { name: 'Quicker Portal SharePoint MCP', version: '1.0.0', description: 'Safely reads and updates the SharePoint site connected in the user’s Quicker Portal desktop.' }
         : isPowerPages
         ? { name: 'Quicker Portal Power Pages MCP', version: '1.0.0', description: 'Builds and operates Power Pages sites through the selected Quicker Portal desktop environment.' }
         : { name: 'Quicker Portal Power Platform MCP', version: '1.0.0', description: 'Executes Power Platform operations through the user-connected Quicker Portal desktop.' },
-      instructions: CONTINUATION_INSTRUCTIONS + '\n' + (!isDevOps && !isSharePoint && !isPowerPages ? POWER_PLATFORM_AUTHORING + '\n' : '') + `This connection is locked to ${configuredExecutionMode(connection.executionMode)} execution mode by the user in Quicker Portal. A tool-call executionMode argument is accepted for compatibility but cannot override that choice. simple executes the requested operation once; verified requires canonical verification evidence before reporting a write as proven; autonomous keeps using safe current-state reads, diagnosis and targeted repair tools until verification is sufficient or human action is required. A result with pending=true is accepted work, not success or failure. Poll the returned pollTool with operationId after pollAfterMs; do not resubmit the original mutation. If the status is outcome_unknown, it remains non-terminal during reconciliation: keep polling and inspect current state before any retry. Never auto-repeat a mutation with an uncertain outcome. Report per-item failures and partial/truncated inventory explicitly. For plug-ins use the Dataverse connector, not only IDE build tools: inspect assemblies/types/steps/images, choose or confirm the built artifact once, register or update, save exact steps and images, then read back and verify solution membership. If writeSucceeded=true with verification=pending, read get_plugin_registration by the returned ID; do not repeat the write. Report required user action and exact errors instead of generic manual-registration advice. ` + (isDevOps
+      instructions: CONTINUATION_INSTRUCTIONS + '\n' + (!isGateway && !isDevOps && !isSharePoint && !isPowerPages ? POWER_PLATFORM_AUTHORING + '\n' : '') + (isGateway ? `This endpoint is strictly scoped to ${(connection.gatewayDomains || []).join(', ')}${connection.gatewayPacks?.dataverse ? `; Dataverse capability packs: ${connection.gatewayPacks.dataverse.join(', ')}` : ''}${Array.isArray(connection.toolAllowlist) ? `; exact tool allowlist: ${connection.toolAllowlist.length} tools` : ''}. Use only tools advertised by this endpoint. ${fixedCategoryMode ? 'Reads run Simple and writes run Verified automatically; executionMode is intentionally absent from tool schemas.' : `This connection is locked to ${configuredExecutionMode(connection.executionMode)} execution mode by the user in Quicker Portal.`} Category scoping is enforced for both discovery and invocation. A result with pending=true is accepted work: poll the returned pollTool and never resubmit the original mutation. ` : `This connection is locked to ${configuredExecutionMode(connection.executionMode)} execution mode by the user in Quicker Portal. A tool-call executionMode argument is accepted for compatibility but cannot override that choice. simple executes the requested operation once; verified requires canonical verification evidence before reporting a write as proven; autonomous keeps using safe current-state reads, diagnosis and targeted repair tools until verification is sufficient or human action is required. A result with pending=true is accepted work, not success or failure. Poll the returned pollTool with operationId after pollAfterMs; do not resubmit the original mutation. If the status is outcome_unknown, it remains non-terminal during reconciliation: keep polling and inspect current state before any retry. Never auto-repeat a mutation with an uncertain outcome. Report per-item failures and partial/truncated inventory explicitly. For plug-ins use the Dataverse connector, not only IDE build tools: inspect assemblies/types/steps/images, choose or confirm the built artifact once, register or update, save exact steps and images, then read back and verify solution membership. If writeSucceeded=true with verification=pending, read get_plugin_registration by the returned ID; do not repeat the write. Report required user action and exact errors instead of generic manual-registration advice. `) + (isGateway ? '' : isDevOps
         ? 'You act as the Microsoft account signed in to the user\'s Quicker Portal desktop, inside the Azure DevOps organizations and projects the user granted to this connection - never more than that account can already do, and never outside the grant. Never ask for personal access tokens, passwords, client IDs or app registrations. Start with list_devops_organizations and list_devops_projects: they return only what is granted, so work only with those. If a call is refused as not granted, tell the user which organization or project to grant in Quicker Portal under Azure DevOps MCP; do not look for a way around it. To answer questions about work, prefer query_devops_work_items with structured filters over hand-written WIQL. Before updating a work item, read it with get_devops_work_item and pass its rev as expectedRevision; if the update reports a conflict, read it again rather than forcing. Azure DevOps has no direct messages: to message someone, find them with search_devops_people and add a comment with add_devops_work_item_comment or add_devops_pull_request_comment, passing them in mentions so they are actually notified. Plain @name text notifies nobody. Pull requests you create are drafts unless the user asks otherwise. Running a pipeline has real effects - deployments, packages, spent minutes - so confirm the exact pipeline and branch with the user first, and never try to pass pipeline variables. Deleting a work item moves it to the recycle bin and requires confirm=true after explicit user approval. Report partial or truncated results, and items withheld outside the grant, explicitly.'
         : isSharePoint
         ? 'The connected Quicker Portal desktop browser session is the only authoritative SharePoint identity and site. Never ask for tenant IDs, client IDs, client secrets, app registrations, Microsoft passwords, cookies, or access tokens. Start with get_sharepoint_connection. Discover current site, drive, list, column, and item IDs before acting. Before changing a list, column, file, or list item, call its exact get/read tool immediately first and use the returned ETag or revision when available; stale writes must be re-read, never forced. For text files use patch_sharepoint_file with the exact SHA-256 revision and targeted anchors returned by read_sharepoint_file; never ask the user to paste the complete file and never reconstruct unchanged content from memory. For list items, send only changed fields using internal column names and the current ETag. Create a list first, then create each requested column with create_sharepoint_column; do not invent internal names or unsupported column types. Column type and internal name are immutable after creation, so create a replacement only after explaining the migration impact. Follow paging links for large libraries and lists. Keep reads bounded. Preview the exact target in your response and use delete tools only after explicit user confirmation. If the desktop or SharePoint session is disconnected, explain that the user must reconnect it in Quicker Portal rather than requesting credentials.'
@@ -443,8 +500,10 @@ export async function handleMcpRequest(ctx, { scopedToolName, resourceKind = 'po
       });
     }
     const scopedAvailable = resourceTools.some(item => item.name === scopedToolName);
-    const definitions = scopedToolName ? resourceTools.filter(item => item.name === scopedToolName || (scopedAvailable && item.name === pollToolFor(resourceKind))) : resourceTools;
-    const page = pageTools(definitions, body.params?.cursor);
+    const scopedDefinition = scopedAvailable ? MCP_TOOL_BY_NAME.get(scopedToolName) : null;
+    const scopedPollKind = scopedDefinition?.group || resourceKind;
+    const definitions = scopedToolName ? resourceTools.filter(item => item.name === scopedToolName || (scopedAvailable && item.name === pollToolFor(scopedPollKind))) : resourceTools;
+    const page = pageTools(definitions, body.params?.cursor, { includeExecutionMode: allowExecutionMode, fixedExecutionMode: 'automatic' });
     if (!page) return sendMcpJson(ctx, 200, jsonRpcError(body.id, -32602, 'The tools/list cursor is invalid or expired.'));
     logger.info('MCP tool catalog page listed.', {
       count: page.tools.length,
@@ -458,18 +517,20 @@ export async function handleMcpRequest(ctx, { scopedToolName, resourceKind = 'po
   if (body.method === 'resources/list') {
     if (!hasScope(connection, 'mcp:read')) return sendMcpJson(ctx, 403, jsonRpcError(body.id, -32003, 'The access token needs mcp:read scope.'));
     return sendMcpJson(ctx, 200, { jsonrpc: '2.0', id: body.id, result: { resources: [{
-      uri: isDevOps ? 'quickerportal://devops/grant' : isSharePoint ? 'quickerportal://sharepoint/current-site' : isPowerPages ? `quickerportal://powerpages/${connection.environmentId}` : `quickerportal://environment/${connection.tenantId}/${connection.environmentId}`,
-      name: isDevOps ? 'Granted Azure DevOps organizations and projects' : connection.environmentName || connection.tenantName || (isSharePoint ? 'Connected SharePoint site' : isPowerPages ? 'Power Pages environment' : 'Connected Power Platform environment'),
-      description: isDevOps ? 'The Azure DevOps organizations and projects this connection may reach.' : isSharePoint ? 'The SharePoint site currently connected in the user’s Quicker Portal desktop browser session.' : isPowerPages ? 'Power Pages sites in the selected live desktop environment.' : 'The live environment selected by the connected Quicker Portal desktop.',
+      uri: isGateway ? `quickerportal://gateway/${connection.id}` : isDevOps ? 'quickerportal://devops/grant' : isSharePoint ? 'quickerportal://sharepoint/current-site' : isPowerPages ? `quickerportal://powerpages/${connection.environmentId}` : `quickerportal://environment/${connection.tenantId}/${connection.environmentId}`,
+      name: isGateway ? (connection.gatewayDomains?.length === 1 ? `${connection.gatewayDomains[0]} MCP endpoint` : 'Quicker Portal MCP Gateway') : isDevOps ? 'Granted Azure DevOps organizations and projects' : connection.environmentName || connection.tenantName || (isSharePoint ? 'Connected SharePoint site' : isPowerPages ? 'Power Pages environment' : 'Connected Power Platform environment'),
+      description: isGateway ? 'The server-enforced tool categories exposed by this MCP endpoint.' : isDevOps ? 'The Azure DevOps organizations and projects this connection may reach.' : isSharePoint ? 'The SharePoint site currently connected in the user’s Quicker Portal desktop browser session.' : isPowerPages ? 'Power Pages sites in the selected live desktop environment.' : 'The live environment selected by the connected Quicker Portal desktop.',
       mimeType: 'application/json'
     }] } });
   }
   if (body.method === 'resources/read') {
     if (!hasScope(connection, 'mcp:read')) return sendMcpJson(ctx, 403, jsonRpcError(body.id, -32003, 'The access token needs mcp:read scope.'));
     return sendMcpJson(ctx, 200, { jsonrpc: '2.0', id: body.id, result: { contents: [{
-      uri: body.params?.uri || (isDevOps ? 'quickerportal://devops/grant' : isSharePoint ? 'quickerportal://sharepoint/current-site' : isPowerPages ? `quickerportal://powerpages/${connection.environmentId}` : `quickerportal://environment/${connection.tenantId}/${connection.environmentId}`),
+      uri: body.params?.uri || (isGateway ? `quickerportal://gateway/${connection.id}` : isDevOps ? 'quickerportal://devops/grant' : isSharePoint ? 'quickerportal://sharepoint/current-site' : isPowerPages ? `quickerportal://powerpages/${connection.environmentId}` : `quickerportal://environment/${connection.tenantId}/${connection.environmentId}`),
       mimeType: 'application/json',
-      text: JSON.stringify(isDevOps
+      text: JSON.stringify(isGateway
+        ? { resource: 'gateway', domains: connection.gatewayDomains || [], capabilityPacks: connection.gatewayPacks || {}, executionMode: fixedCategoryMode ? null : configuredExecutionMode(connection.executionMode), executionPolicy: fixedCategoryMode ? 'automatic' : 'selectable', readMode: fixedCategoryMode ? 'simple' : undefined, writeMode: fixedCategoryMode ? 'verified' : undefined, executionModeSelectable: !fixedCategoryMode, tenantId: connection.tenantId, environmentId: connection.environmentId, environmentName: connection.environmentName }
+        : isDevOps
         ? { resource: 'devops', execution: 'connected-desktop-microsoft-account', grant: connection.devopsGrant || { organizations: {} }, appRegistrationRequired: false, personalAccessTokenRequired: false }
         : isSharePoint
         ? { resource: 'sharepoint', site: connection.environmentName, execution: 'connected-desktop-browser-session', appRegistrationRequired: false }
@@ -480,9 +541,11 @@ export async function handleMcpRequest(ctx, { scopedToolName, resourceKind = 'po
   }
   if (body.method === 'tools/call') {
     const requestedName = String(body.params?.name || '');
-    if (scopedToolName && requestedName !== scopedToolName && !(requestedName === pollToolFor(resourceKind) && resourceTools.some(item => item.name === scopedToolName))) return sendMcpJson(ctx, 200, jsonRpcError(body.id, -32602, `This endpoint only exposes ${scopedToolName} and its operation-status tool.`));
+    const scopedDefinition = scopedToolName ? MCP_TOOL_BY_NAME.get(scopedToolName) : null;
+    const scopedPollKind = scopedDefinition?.group || resourceKind;
+    if (scopedToolName && requestedName !== scopedToolName && !(requestedName === pollToolFor(scopedPollKind) && resourceTools.some(item => item.name === scopedToolName))) return sendMcpJson(ctx, 200, jsonRpcError(body.id, -32602, `This endpoint only exposes ${scopedToolName} and its operation-status tool.`));
     const tool = MCP_TOOL_BY_NAME.get(requestedName);
-    if (!tool || tool.group !== resourceKind) return sendMcpJson(ctx, 200, jsonRpcError(body.id, -32602, `Unknown tool: ${requestedName}.`));
+    if (!tool || !scopedResourceTools.some(item => item.name === requestedName)) return sendMcpJson(ctx, 200, jsonRpcError(body.id, -32602, `Unknown tool: ${requestedName}.`));
     // Enforced here too, not only in the advertised list: a client may have
     // cached an older list, or simply guessed a name.
     const permitted = toolAllowed(tool, connection.toolPolicy);
@@ -500,7 +563,8 @@ export async function handleMcpRequest(ctx, { scopedToolName, resourceKind = 'po
         'WWW-Authenticate': `Bearer resource_metadata="${resourceMetadataUrl(ctx)}", error="insufficient_scope", scope="${INITIAL_OAUTH_SCOPES}"`
       });
     }
-    const response = await executeTool(ctx, connection, tool, body.params?.arguments || {}, body.id, resourceKind, scopedToolName);
+    const routed = isGateway ? await gatewayExecutionConnection(connection, tool) : { connection, resourceKind };
+    const response = await executeTool(ctx, routed.connection, tool, body.params?.arguments || {}, body.id, routed.resourceKind, scopedToolName, { allowExecutionMode });
     return sendMcpJson(ctx, 200, response);
   }
   if (isNotification) return sendAccepted(ctx);

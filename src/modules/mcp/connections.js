@@ -5,6 +5,8 @@ import { AuthenticationError, NotFoundError, ValidationError } from '../../core/
 import { DEVOPS_DEFAULT_POLICY, normalizePolicy } from './tool-policy.js';
 import { normalizeDevOpsGrant } from './devops-grant.js';
 import { EXECUTION_MODES, configuredExecutionMode } from './execution-mode.js';
+import { gatewayToolsForScope, normalizeGatewayDomains, normalizeGatewayPacks, normalizeGatewayToolAllowlist } from './gateway-taxonomy.js';
+import { MCP_TOOLS } from './tool-catalog.js';
 
 const store = new JsonStore('mcp/connections.json', { version: 1, connections: [] });
 const MAX_ACTIVE_CONNECTIONS_PER_USER = 20;
@@ -30,6 +32,11 @@ function publicConnection(connection) {
     environmentName: connection.environmentName,
     captureMode: connection.captureMode,
     executionMode: configuredExecutionMode(connection.executionMode),
+    executionModeSelectable: connection.executionModeSelectable !== false && !['sharepoint', 'powerpages', 'devops', 'ide'].includes(connection.kind || ''),
+    gatewayDomains: Array.isArray(connection.gatewayDomains) ? [...connection.gatewayDomains] : null,
+    gatewayPacks: connection.gatewayPacks && typeof connection.gatewayPacks === 'object' ? Object.fromEntries(Object.entries(connection.gatewayPacks).map(([domain, packs]) => [domain, Array.isArray(packs) ? [...packs] : []])) : null,
+    toolAllowlist: Array.isArray(connection.toolAllowlist) ? [...connection.toolAllowlist] : null,
+    gatewayScope: Array.isArray(connection.gatewayDomains) ? (connection.gatewayDomains.length === 1 ? 'category' : 'combined') : 'legacy',
     enabled: connection.enabled,
     keyPrefix: connection.keyPrefix,
     // What this connection may reach. Absent on older records, which is why it
@@ -47,7 +54,24 @@ export async function createMcpConnection(userId, input, endpointBase) {
   const environmentId = cleanIdentifier(input.environmentId || tenantId, 'environmentId', 256);
   const name = String(input.name || input.environmentName || 'Quicker Portal MCP').trim().slice(0, 100);
   const captureMode = input.captureMode === 'metadata' ? 'metadata' : 'detailed';
-  const requestedExecutionMode = String(input.executionMode || 'verified').trim().toLowerCase();
+  const explicitGatewayScope = Array.isArray(input.gatewayDomains) || typeof input.gatewayDomains === 'string';
+  let gatewayDomains = null;
+  if (explicitGatewayScope) {
+    try { gatewayDomains = normalizeGatewayDomains(input.gatewayDomains); }
+    catch (error) { throw new ValidationError(error.message, { field: 'gatewayDomains' }); }
+  }
+  let gatewayPacks = null;
+  if (gatewayDomains) {
+    try { gatewayPacks = normalizeGatewayPacks(input.gatewayPacks, gatewayDomains); }
+    catch (error) { throw new ValidationError(error.message, { field: 'gatewayPacks' }); }
+  }
+  let toolAllowlist = null;
+  if (gatewayDomains && input.toolAllowlist != null) {
+    try { toolAllowlist = normalizeGatewayToolAllowlist(input.toolAllowlist, MCP_TOOLS, gatewayDomains, gatewayPacks); }
+    catch (error) { throw new ValidationError(error.message, { field: 'toolAllowlist' }); }
+  }
+  const executionModeSelectable = !gatewayDomains || gatewayDomains.length > 1;
+  const requestedExecutionMode = executionModeSelectable ? String(input.executionMode || 'verified').trim().toLowerCase() : 'verified';
   if (!EXECUTION_MODES.includes(requestedExecutionMode)) {
     throw new ValidationError('Execution mode must be simple, verified, or autonomous.', { field: 'executionMode' });
   }
@@ -57,7 +81,7 @@ export async function createMcpConnection(userId, input, endpointBase) {
   const now = new Date().toISOString();
   const record = {
     id,
-    kind: 'power-platform',
+    kind: gatewayDomains ? 'gateway' : 'power-platform',
     userId,
     tenantId,
     tenantKey: tenantId.toLowerCase(),
@@ -68,6 +92,8 @@ export async function createMcpConnection(userId, input, endpointBase) {
     name,
     captureMode,
     executionMode: requestedExecutionMode,
+    executionModeSelectable,
+    ...(gatewayDomains ? { gatewayDomains, gatewayPacks, ...(toolAllowlist ? { toolAllowlist } : {}) } : {}),
     enabled: true,
     keyHash: sha256Hex(apiKey),
     keyPrefix: `${apiKey.slice(0, 18)}...`,
@@ -217,6 +243,7 @@ export function sharePointMcpConnectionSeed(userId, { now = new Date().toISOStri
     name: 'Quicker Portal SharePoint MCP',
     captureMode: 'metadata',
     executionMode: 'verified',
+    executionModeSelectable: false,
     keyHash: null,
     keyPrefix: null,
     createdAt: now,
@@ -265,6 +292,7 @@ export function devOpsMcpConnectionSeed(userId, { now = new Date().toISOString()
     name: 'Quicker Portal Azure DevOps MCP',
     captureMode: 'metadata',
     executionMode: 'verified',
+    executionModeSelectable: false,
     devopsGrant: { organizations: {} },
     toolPolicy: { ...DEVOPS_DEFAULT_POLICY, subjects: [...DEVOPS_DEFAULT_POLICY.subjects] },
     keyHash: null,
@@ -345,7 +373,7 @@ export async function ensurePowerPagesMcpConnection(userId, input = {}) {
     kind: 'powerpages', userId, tenantId: tenantKey, tenantKey: tenantKey.toLowerCase(),
     sourceTenantId: tenantId, environmentId, environmentKey: environmentId.toLowerCase(),
     name: 'Quicker Portal Power Pages MCP', captureMode: 'metadata', keyHash: null,
-    executionMode: 'verified',
+    executionMode: 'verified', executionModeSelectable: false,
     keyPrefix: null, createdAt: now, lastUsedAt: null
   };
   if (mongoEnabled()) {
@@ -374,7 +402,10 @@ export function powerPagesMcpConnectionEndpoint(endpointBase, userId, tenantId) 
 
 export function mcpConnectionEndpoint(endpointBase, connection) {
   const base = String(endpointBase).replace(/\/+$/, '');
-  const path = `/mcp/${encodeURIComponent(connection.userId)}/${encodeURIComponent(connection.tenantId)}`;
+  const domains = Array.isArray(connection.gatewayDomains) ? connection.gatewayDomains : null;
+  const path = (connection.kind || 'power-platform') === 'gateway'
+    ? `/gateway/mcp/${encodeURIComponent(connection.userId)}/${encodeURIComponent(connection.tenantId)}${domains?.length === 1 ? `/${encodeURIComponent(domains[0])}` : ''}`
+    : `/mcp/${encodeURIComponent(connection.userId)}/${encodeURIComponent(connection.tenantId)}`;
   return `${base}${path}?connection_id=${encodeURIComponent(connection.id)}`;
 }
 
@@ -404,6 +435,24 @@ export async function activeMcpConnectionsForResource({ userId, tenantId }) {
     && item.userId === userId
     && item.tenantId.toLowerCase() === String(tenantId).toLowerCase()
   ));
+}
+
+export async function findActiveMcpConnectionByKind(userId, kind, { tenantId = '', environmentId = '' } = {}) {
+  const queryKind = String(kind || '').trim();
+  if (!queryKind) return null;
+  if (mongoEnabled()) {
+    const query = { userId, kind: queryKind, enabled: true };
+    if (tenantId) query.tenantKey = String(tenantId).toLowerCase();
+    if (environmentId) query.environmentKey = String(environmentId).toLowerCase();
+    const row = await (await mongoCollection('mcp_connections')).findOne(query, { sort: { createdAt: -1 } });
+    if (!row) return null;
+    const { _id, ...connection } = row;
+    return connection;
+  }
+  const document = await store.read();
+  return document.connections.find(item => item.userId === userId && item.kind === queryKind && item.enabled
+    && (!tenantId || item.tenantKey === String(tenantId).toLowerCase())
+    && (!environmentId || item.environmentKey === String(environmentId).toLowerCase())) || null;
 }
 
 export async function revokeMcpConnection(userId, connectionId) {
@@ -510,8 +559,54 @@ export async function setMcpConnectionToolPolicy(userId, connectionId, policy) {
  * payload. Safety and persistence choices belong to the person in Quicker
  * Portal; an MCP client must not silently change them for one call.
  */
+
+export async function setMcpConnectionToolScope(userId, connectionId, toolAllowlist) {
+  const id = cleanIdentifier(connectionId, 'MCP connection ID');
+  const updateRecord = current => {
+    const kind = current.kind || 'power-platform';
+    let available;
+    if (kind === 'gateway') {
+      available = gatewayToolsForScope(MCP_TOOLS, current.gatewayDomains, current.gatewayPacks, null);
+    } else {
+      available = MCP_TOOLS.filter(tool => (tool.group || 'power-platform') === kind);
+    }
+    const names = toolAllowlist == null
+      ? null
+      : [...new Set((Array.isArray(toolAllowlist) ? toolAllowlist : [toolAllowlist]).map(item => String(item || '').trim()).filter(Boolean))];
+    if (names && !names.length) throw new ValidationError('Select at least one MCP tool.', { field: 'toolAllowlist' });
+    if (names) {
+      const allowed = new Set(available.map(tool => tool.name));
+      const invalid = names.filter(name => !allowed.has(name));
+      if (invalid.length) throw new ValidationError(`Selected MCP tools are outside this endpoint scope: ${invalid.slice(0, 8).join(', ')}${invalid.length > 8 ? '…' : ''}.`, { field: 'toolAllowlist' });
+    }
+    current.toolAllowlist = names;
+    return publicConnection(current);
+  };
+  if (mongoEnabled()) {
+    const collection = await mongoCollection('mcp_connections');
+    const current = await collection.findOne({ id, userId });
+    if (!current) throw new NotFoundError('MCP connection was not found.');
+    const publicValue = updateRecord(current);
+    await collection.updateOne({ id, userId }, { $set: { toolAllowlist: current.toolAllowlist } });
+    return publicValue;
+  }
+  let result;
+  await store.update(document => {
+    const current = document.connections.find(item => item.id === id && item.userId === userId);
+    if (!current) throw new NotFoundError('MCP connection was not found.');
+    result = updateRecord(current);
+    return { result };
+  });
+  return result;
+}
+
 export async function setMcpConnectionExecutionMode(userId, connectionId, value) {
   const id = cleanIdentifier(connectionId, 'MCP connection ID');
+  const current = await findMcpConnectionById(id);
+  if (!current || current.userId !== userId) throw new NotFoundError('MCP connection not found.');
+  if (current.executionModeSelectable === false || ['sharepoint', 'powerpages', 'devops', 'ide'].includes(current.kind) || (Array.isArray(current.gatewayDomains) && current.gatewayDomains.length === 1)) {
+    throw new ValidationError('Single-category MCP endpoints use fixed Verified execution. Create a combined endpoint to choose Simple, Verified, or Autonomous.', { field: 'executionMode', code: 'MCP_EXECUTION_MODE_FIXED' });
+  }
   const executionMode = String(value || '').trim().toLowerCase();
   if (!EXECUTION_MODES.includes(executionMode)) {
     throw new ValidationError('Execution mode must be simple, verified, or autonomous.', { field: 'executionMode' });
@@ -571,9 +666,10 @@ export function mcpResourceMetadata(resourceUrl, serviceBaseUrl, { kind = 'power
   const isSharePoint = resourceKind === 'sharepoint';
   const isPowerPages = resourceKind === 'powerpages';
   const isDevOps = resourceKind === 'devops';
+  const isGateway = resourceKind === 'gateway';
   return {
     resource: resourceUrl,
-    resource_name: isIde ? 'Quicker Portal IDE MCP' : isDevOps ? 'Quicker Portal Azure DevOps MCP' : isSharePoint ? 'Quicker Portal SharePoint MCP' : isPowerPages ? 'Quicker Portal Power Pages MCP' : 'Quicker Portal Power Platform MCP',
+    resource_name: isIde ? 'Quicker Portal IDE MCP' : isGateway ? 'Quicker Portal MCP Gateway' : isDevOps ? 'Quicker Portal Azure DevOps MCP' : isSharePoint ? 'Quicker Portal SharePoint MCP' : isPowerPages ? 'Quicker Portal Power Pages MCP' : 'Quicker Portal Power Platform MCP',
     authorization_servers: [serviceBaseUrl.replace(/\/+$/, '')],
     scopes_supported: ['mcp:read', 'mcp:write', 'offline_access'],
     bearer_methods_supported: ['header'],
