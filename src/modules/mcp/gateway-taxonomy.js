@@ -25,7 +25,7 @@ const DOMAIN_ID_SET = new Set(GATEWAY_DOMAIN_IDS);
 export const GATEWAY_CAPABILITY_PACKS = Object.freeze({
   dataverse: Object.freeze([
     { id: 'data', order: 10, label: 'Data', description: 'Query, search, create, update, delete, import/export, bulk, duplicate, and change-tracking operations.', sections: Object.freeze(['Rows & query']) },
-    { id: 'schema', order: 20, label: 'Schema', description: 'Tables, columns, relationships, choices, alternate keys, and ER metadata.', sections: Object.freeze(['Tables', 'Columns', 'Relationships', 'Choices']) },
+    { id: 'schema', order: 20, label: 'Schema', description: 'Bulk schema projects, tables, columns, relationships, choices, alternate keys, and ER metadata.', sections: Object.freeze(['Bulk schema', 'Tables', 'Columns', 'Relationships', 'Choices']) },
     { id: 'app-design', order: 30, label: 'App Design', description: 'Forms, views, and model-driven app authoring.', sections: Object.freeze(['Forms', 'Views', 'Model-driven apps']) },
     { id: 'security', order: 40, label: 'Security', description: 'Roles, teams, users, privileges, business units, field security, and record access.', sections: Object.freeze(['Security']) },
     { id: 'diagnostics', order: 50, label: 'Diagnostics', description: 'Audit, environment overview, connection status, and Dataverse API discovery.', sections: Object.freeze(['Audit', 'Environment & discovery', 'Other platform tools']) }
@@ -56,6 +56,7 @@ for (const [domain, packs] of PACKS_BY_DOMAIN.entries()) {
 const section = (domain, value) => ({ domain, section: value });
 
 function classifyPowerPlatform(name) {
+  if (/bulk_apply_dataverse_schema/.test(name)) return section('dataverse', 'Bulk schema');
   if (/canvas/.test(name)) {
     if (/control|api|data_source/.test(name)) return section('canvas', 'Controls, APIs & data');
     if (/source|pending_diff|authoring|prerequisite|disconnect/.test(name)) return section('canvas', 'Source authoring');

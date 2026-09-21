@@ -91,3 +91,23 @@ limits. If real user action is required, say exactly what and preserve the handl
 If the host ends the turn, preserve the operation/run ID for resumption; do not
 pretend polling or execution continues without an active client. An unknown
 outcome requires inspection before any new write, not automatic replay.`;
+
+export const DATAVERSE_BULK_SCHEMA_GUIDANCE = `DATAVERSE BULK SCHEMA CONTRACT
+When the user asks to create a project model, multiple tables, or one table with
+several new columns/relationships, prefer bulk_apply_dataverse_schema instead of
+issuing repeated create_table/create_column/create_relationship calls. Put the
+whole expressible schema into one start call when it fits: tables may contain
+columns and lookup relationships, including local Choice/Picklist/OptionSet
+options. One inline call supports up to 50 tables, 1,000 non-lookup columns and
+500 relationships. If the JSON is too large for one MCP call, use the SAME tool
+with stage, append and execute; staged jobs support up to 100 tables, 5,000
+columns and 2,000 relationships across bounded chunks. Do not invent raw
+Dataverse EntityMetadata payloads: use the advertised simplified schema exactly.
+Use strategy=auto unless the user explicitly chooses Direct Bulk or Solution
+Wrapper. Solution Wrapper means supported metadata writes scoped into an
+unmanaged Dataverse solution; it is not hand-authored raw solution XML and must
+not be described as guaranteed faster. If start/execute returns pending=true,
+poll the returned get_power_platform_operation operationId until terminal and
+never replay the bulk mutation. Use primitive schema tools only for isolated
+single-component edits, unsupported features, or targeted repair after reading
+current state.`;

@@ -78,8 +78,16 @@ test('tool discovery metadata remains within its regression budget', () => {
     // schema bytes, but discovery is byte-paged below. Keep narrow headroom so
     // future growth still needs an explicit review rather than silently
     // increasing every client's discovery cost.
-    const aggregateBudget = group === 'power-platform' ? 460 * 1024 : 50 * 1024;
-    const averageBudget = group === 'power-platform' ? 1_900 : 1_700;
+    // Reviewed 2026-09-22: bulk_apply_dataverse_schema is one compound tool
+    // describing tables, columns, choices and relationships in a single
+    // contract, and costs 26 KiB of the 484 KiB total on its own. It is
+    // deliberate - it replaces long runs of primitive create_* calls - so the
+    // alarm moves once, with headroom for roughly one more tool, not enough to
+    // absorb silent growth. The transport invariants below are unchanged: the
+    // largest single descriptor is 34 KiB against a 40 KiB cap, and discovery
+    // still pages at 48 KiB.
+    const aggregateBudget = group === 'power-platform' ? 500 * 1024 : 50 * 1024;
+    const averageBudget = group === 'power-platform' ? 2_000 : 1_700;
     assert.ok(totalBytes < aggregateBudget, `${group} MCP catalog regressed to ${totalBytes} bytes.`);
     assert.ok(totalBytes / advertised.length < averageBudget, `${group} average MCP descriptor regressed to ${Math.ceil(totalBytes / advertised.length)} bytes.`);
     assert.ok(largest < 40 * 1024, `An individual ${group} MCP tool descriptor regressed to ${largest} bytes.`);

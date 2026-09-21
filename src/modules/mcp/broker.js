@@ -79,6 +79,7 @@ export async function enqueueDesktopToolCall({ connection, tool, arguments: args
     status: 'queued',
     createdAt: now,
     expiresAt: new Date(Date.now() + tool.timeoutMs).toISOString(),
+    leaseMs: Math.max(DEFAULT_LEASE_MS, Number(tool.leaseMs || 0) || DEFAULT_LEASE_MS),
     claimedAt: null,
     completedAt: null,
     result: null,
@@ -166,6 +167,9 @@ async function claimDesktopJobsOnce({ userId, tenantId, environmentId, clientIns
             status: 'leased',
             claimKey,
             claimedAt: nowIso,
+            // Claim atomically with the conservative default lease first. The
+            // selected job's per-tool lease is only known after Mongo returns it;
+            // extend it immediately below while the row is already exclusively leased.
             leaseExpiresAt: new Date(nowMs + DEFAULT_LEASE_MS).toISOString(),
             clientInstanceId: String(clientInstanceId || '').slice(0, 128)
           }
@@ -173,10 +177,11 @@ async function claimDesktopJobsOnce({ userId, tenantId, environmentId, clientIns
         { sort: { createdAt: 1 }, returnDocument: 'after' }
       );
       if (!job) break;
+      const requestedLeaseMs = Math.max(DEFAULT_LEASE_MS, Number(job.leaseMs || 0) || DEFAULT_LEASE_MS);
       const leaseHash = sha256Hex(`${job.id}:${leaseToken}`);
       const secured = await collection.findOneAndUpdate(
         { id: job.id, status: 'leased', leaseHash: null },
-        { $set: { leaseHash } },
+        { $set: { leaseHash, leaseExpiresAt: new Date(nowMs + requestedLeaseMs).toISOString() } },
         { returnDocument: 'after' }
       );
       if (!secured) continue;
@@ -241,7 +246,7 @@ async function claimDesktopJobsOnce({ userId, tenantId, environmentId, clientIns
       job.status = 'leased';
       job.claimKey = claimKey;
       job.claimedAt = new Date().toISOString();
-      job.leaseExpiresAt = new Date(nowMs + DEFAULT_LEASE_MS).toISOString();
+      job.leaseExpiresAt = new Date(nowMs + Math.max(DEFAULT_LEASE_MS, Number(job.leaseMs || 0) || DEFAULT_LEASE_MS)).toISOString();
       job.leaseHash = sha256Hex(`${job.id}:${leaseToken}`);
       job.clientInstanceId = String(clientInstanceId || '').slice(0, 128);
     }

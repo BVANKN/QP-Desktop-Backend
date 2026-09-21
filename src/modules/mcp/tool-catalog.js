@@ -39,6 +39,7 @@ function tool(name, action, description, inputSchema = object(), options = {}) {
     argumentEnvelope: options.argumentEnvelope || undefined,
     execution: options.execution || 'connected-desktop',
     timeoutMs: options.timeoutMs || 55_000,
+    leaseMs: options.leaseMs || undefined,
     quarantined: Boolean(options.quarantined),
     quarantineReason: options.quarantineReason || ''
   });
@@ -113,6 +114,42 @@ const columnCreateDefinition = {
     { if: { properties: { type: { const: 'Money' } }, required: ['type'] }, then: { properties: { precision: { maximum: 4 } } } }
   ]
 };
+const bulkSchemaColumn = {
+  ...columnCreateDefinition,
+  description: 'One non-lookup Dataverse column. For lookups use relationships so the desktop creates the lookup and relationship atomically.'
+};
+const bulkSchemaRelationship = object({
+  fromTableKey: string('Referencing table schema/logical name. When nested under a table this can be omitted.'),
+  fromTableLogicalName: string('Optional explicit referencing table logical name.'),
+  lookupColumnSchemaName: string('Lookup column schema name to create on the referencing table.'),
+  lookupColumnDisplayName: string('Lookup display name.'),
+  targetTableLogicalName: string('Referenced/target table logical name. May be another table in this same bulk schema.'),
+  relationshipSchemaName: string('Optional relationship schema name. The desktop generates a deterministic name when omitted.'),
+  requiredLevel,
+  description: string('Optional relationship/lookup description.')
+}, ['lookupColumnSchemaName', 'targetTableLogicalName']);
+const bulkSchemaTable = {
+  ...object({
+    ...tableCreateDefinition.properties,
+    columns: array(bulkSchemaColumn, 'Columns to create on this table in the same coordinated schema job.', { maxItems: 500 }),
+    relationships: array(bulkSchemaRelationship, 'Lookup relationships originating from this table.', { maxItems: 200 })
+  }, ['schemaName']),
+  description: 'One table plus optional columns and lookup relationships. The desktop creates tables first, then dependent metadata.'
+};
+const bulkSchemaPayload = object({
+  tables: array(bulkSchemaTable, 'Tables to create. Inline jobs support up to 50 tables; prefer chunk staging for very large generated projects.', { maxItems: 50 }),
+  columns: array({
+    ...bulkSchemaColumn,
+    properties: {
+      ...bulkSchemaColumn.properties,
+      tableKey: string('Owning table schema/logical name.'),
+      tableLogicalName: string('Optional explicit owning table logical name.')
+    }
+  }, 'Optional top-level columns when not nested beneath a table.', { maxItems: 1000 }),
+  relationships: array(bulkSchemaRelationship, 'Optional top-level relationships.', { maxItems: 500 })
+});
+const bulkSchemaStrategy = { type: 'string', enum: ['auto', 'direct', 'solution'], description: 'Execution strategy. auto lets Quicker Portal Desktop choose from schema size/complexity; direct performs supported Dataverse metadata calls directly; solution wraps the same supported metadata operations in a temporary/existing unmanaged solution for coordinated ownership and review. It never hand-authors unsupported raw solution XML.' };
+
 const columnUpdateChanges = { ...object({
   displayName: string('New display name.'),
   description: string('New description.'),
@@ -618,10 +655,20 @@ export const MCP_TOOLS = Object.freeze([
   tool('update_record', 'mcpUpdateRecord', 'Update selected values on one Dataverse row.', object({ tableLogicalName: tableName, recordId, values: dataverseRowPayload }, ['tableLogicalName', 'recordId', 'values']), { readOnly: false, idempotent: true }),
   tool('delete_record', 'mcpDeleteRecord', 'Permanently delete one Dataverse row after explicit approval.', object({ tableLogicalName: tableName, recordId, confirm }, ['tableLogicalName', 'recordId', 'confirm']), { readOnly: false, destructive: true }),
 
-  tool('create_table', 'createTable', 'Create a custom Dataverse table/entity only when the user explicitly asks for a table or entity. Do NOT use this tool for model-driven app/MDA creation; use create_model_app for app requests. Uses the exact simplified desktop contract, not raw Dataverse EntityMetadata. Unknown properties are rejected before dispatch.', object({ definition: tableCreateDefinition }, ['definition']), { readOnly: false, argumentEnvelope: 'definition' }),
+  tool('bulk_apply_dataverse_schema', 'bulkApplyDataverseSchema', 'PREFERRED tool for creating a multi-table Dataverse schema or an entire project model. Send tables, columns, local choice fields, and lookup relationships together so Quicker Portal Desktop performs one coordinated job instead of many GPT↔MCP round trips. Use operation=start for normal projects. The desktop serializes table creation to respect Dataverse customization locks, creates dependent columns/relationships in order, reconciles uncertain writes before retrying, publishes in bounded phases, and performs one final canonical verification pass. Inline payloads support up to 50 tables, 1,000 columns, and 500 relationships within the MCP 4 MiB delivery limit; for larger generated schemas use operation=stage/append with bounded chunks, then operation=execute. A staged job supports up to 100 tables, 5,000 columns, and 2,000 relationships within the desktop staging budget. A start/execute call may run for several or tens of minutes for large schemas. If MCP returns pending=true, poll the returned get_power_platform_operation operationId and never resubmit the original schema mutation. Do not fall back to repeated create_table/create_column calls for a multi-table/project request unless this tool cannot express a required component.', object({
+    operation: { type: 'string', enum: ['start', 'stage', 'append', 'execute', 'discard'], description: 'start = execute an inline schema job; stage/append = assemble a very large schema in bounded chunks; execute = run the staged schema; discard = remove an unexecuted staged schema.' },
+    operationId: string('Staging ID returned by this same tool. Required for append/execute/discard.'),
+    schema: bulkSchemaPayload,
+    schemaChunk: bulkSchemaPayload,
+    strategy: bulkSchemaStrategy,
+    continueOnError: boolean('Continue after an item-level failure. Defaults false so the first unresolved metadata failure stops new work.'),
+    publishAfterImport: boolean('Publish all customizations once after the coordinated job. Defaults true.'),
+    solutionUniqueName: string('Optional existing unmanaged solution unique name when strategy=solution. If omitted, Quicker Portal creates a temporary wrapper solution.')
+  }), { readOnly: false, timeoutMs: 1_800_000, leaseMs: 2_700_000 }),
+  tool('create_table', 'createTable', 'Create one custom Dataverse table/entity only when the user explicitly asks for a single-table primitive operation. For a project, multiple tables, or a table plus many columns/relationships, prefer bulk_apply_dataverse_schema to remove repeated AI/MCP round trips. Do NOT use this tool for model-driven app/MDA creation; use create_model_app for app requests. Uses the exact simplified desktop contract, not raw Dataverse EntityMetadata. Unknown properties are rejected before dispatch.', object({ definition: tableCreateDefinition }, ['definition']), { readOnly: false, argumentEnvelope: 'definition' }),
   tool('update_table', 'updateTable', 'Update only the table properties the desktop implementation actually supports. Unknown or immutable properties are rejected before dispatch.', object({ logicalName: tableName, changes: tableUpdateChanges }, ['logicalName', 'changes']), { readOnly: false, idempotent: true, argumentEnvelope: 'changes' }),
   tool('delete_table', 'deleteTable', 'Delete a custom Dataverse table after explicit approval.', object({ logicalName: tableName, confirm }, ['logicalName', 'confirm']), { readOnly: false, destructive: true }),
-  tool('create_column', 'createColumn', 'Create a Dataverse column using the exact desktop payload vocabulary. Do not send SDK metadata names, UI labels, required=true, or guessed type aliases. Use create_relationship for lookups.', object({ tableLogicalName: tableName, definition: columnCreateDefinition }, ['tableLogicalName', 'definition']), { readOnly: false, argumentEnvelope: 'definition' }),
+  tool('create_column', 'createColumn', 'Create one Dataverse column using the exact desktop payload vocabulary. For a table/project containing several new columns, prefer bulk_apply_dataverse_schema. Do not send SDK metadata names, UI labels, required=true, or guessed type aliases. Use create_relationship for isolated lookups.', object({ tableLogicalName: tableName, definition: columnCreateDefinition }, ['tableLogicalName', 'definition']), { readOnly: false, argumentEnvelope: 'definition' }),
   tool('update_column', 'updateColumn', 'Update only mutable column fields supported by the desktop handler. Type/schema/logical-name changes are not accepted.', object({ tableLogicalName: tableName, columnLogicalName: columnName, changes: columnUpdateChanges }, ['tableLogicalName', 'columnLogicalName', 'changes']), { readOnly: false, idempotent: true, argumentEnvelope: 'changes' }),
   tool('delete_column', 'deleteColumn', 'Delete a custom Dataverse column after explicit approval.', object({ tableLogicalName: tableName, columnLogicalName: columnName, confirm }, ['tableLogicalName', 'columnLogicalName', 'confirm']), { readOnly: false, destructive: true }),
   tool('create_alternate_key', 'createAlternateKey', 'Create a Dataverse alternate key after validating supported columns and platform limits. Key provisioning continues asynchronously in Dataverse.', object({ tableLogicalName: tableName, schemaName: string('Alternate-key schema name.'), displayName: string('Display name.'), keyAttributes: array(columnName, 'One to sixteen supported column logical names.', { minItems: 1, maxItems: 16 }), solutionUniqueName }, ['tableLogicalName', 'schemaName', 'keyAttributes']), { readOnly: false, timeoutMs: 90_000 }),
