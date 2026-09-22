@@ -104,9 +104,11 @@ with stage, append and execute; staged jobs support up to 100 tables, 5,000
 columns and 2,000 relationships across bounded chunks. Do not invent raw
 Dataverse EntityMetadata payloads: use the advertised simplified schema exactly.
 Use strategy=auto unless the user explicitly chooses Direct Bulk or Solution
-Wrapper. Solution Wrapper means supported metadata writes scoped into an
-unmanaged Dataverse solution; it is not hand-authored raw solution XML and must
-not be described as guaranteed faster. If start/execute returns pending=true,
+Wrapper. Direct Bulk runs on Quicker Portal Desktop and automatically prefers
+the official Microsoft Dataverse .NET SDK when Developer Setup verifies a matching supported .NET SDK/runtime pair; columns and relationships use bounded ExecuteMultiple batching, with the existing Web API engine as the pre-write compatibility fallback.
+Solution Wrapper means supported metadata writes scoped into an unmanaged
+Dataverse solution; it is not hand-authored raw solution XML and must not be
+described as guaranteed faster. If start/execute returns pending=true,
 poll the returned get_power_platform_operation operationId until terminal and
 never replay the bulk mutation. Use primitive schema tools only for isolated
 single-component edits, unsupported features, or targeted repair after reading
