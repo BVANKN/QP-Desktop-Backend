@@ -5,6 +5,7 @@
 import { RateLimitError } from '../errors.js';
 
 const buckets = new Map(); // key -> { count, windowStart }
+const MAX_BUCKETS = 20_000;
 
 // Periodic sweep keeps the map bounded even under key-spray attacks.
 const SWEEP_INTERVAL_MS = 5 * 60_000;
@@ -27,6 +28,9 @@ export function consumeRateLimit(name, key, { windowMs, max }) {
   const now = Date.now();
   let bucket = buckets.get(bucketKey);
   if (!bucket || now - bucket.windowStart >= windowMs) {
+    if (!bucket && buckets.size >= MAX_BUCKETS) {
+      throw new RateLimitError('Request capacity is temporarily exhausted. Try again later.', 60);
+    }
     bucket = { count: 0, windowStart: now, windowMs };
     buckets.set(bucketKey, bucket);
   }

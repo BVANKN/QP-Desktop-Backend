@@ -85,6 +85,12 @@ test('free users cannot create MCP connections', async () => {
 test('Pro users can initialize MCP and discover the governed tool catalog', async () => {
   const session = await registerUser('mcppro', 'pro');
   assert.ok(session.entitlements.includes('mcp.server'));
+  const basic = await server.call('POST', '/api/mcp/connections', { tenantId, environmentId }, { accessToken: session.accessToken });
+  assert.equal(basic.status, 201, JSON.stringify(basic.body));
+  assert.equal(basic.body.connection.captureMode, 'metadata', 'business payloads require an explicit opt-in');
+  const detailed = await server.call('POST', '/api/mcp/connections', { tenantId, environmentId, captureMode: 'detailed' }, { accessToken: session.accessToken });
+  assert.equal(detailed.status, 201, JSON.stringify(detailed.body));
+  assert.equal(detailed.body.connection.captureMode, 'detailed');
   const connection = await createConnection(session, 'metadata', 'autonomous');
   assert.equal(connection.connection.executionMode, 'autonomous');
 

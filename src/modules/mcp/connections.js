@@ -53,7 +53,9 @@ export async function createMcpConnection(userId, input, endpointBase) {
   const tenantId = cleanIdentifier(input.tenantId, 'tenantId');
   const environmentId = cleanIdentifier(input.environmentId || tenantId, 'environmentId', 256);
   const name = String(input.name || input.environmentName || 'Quicker Portal MCP').trim().slice(0, 100);
-  const captureMode = input.captureMode === 'metadata' ? 'metadata' : 'detailed';
+  // Business payload capture is opt-in. Metadata is the safe default for a
+  // new connection; older connections retain their existing saved choice.
+  const captureMode = input.captureMode === 'detailed' ? 'detailed' : 'metadata';
   const explicitGatewayScope = Array.isArray(input.gatewayDomains) || typeof input.gatewayDomains === 'string';
   let gatewayDomains = null;
   if (explicitGatewayScope) {

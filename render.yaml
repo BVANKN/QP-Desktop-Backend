@@ -18,8 +18,11 @@ services:
         sync: false
       - key: MONGODB_DB_NAME
         value: quicker_portal
-      # Optional hardening: QP_SIGNING_SECRET may be added manually in Render.
-      # If omitted, QP generates a signing-key set once and persists it in MongoDB.
+      # Optional but recommended: separate token signing from database access.
+      # If omitted, QP generates a signing-key set once in MongoDB. Rotating
+      # this value invalidates existing access tokens; plan a refresh window.
+      - key: QP_SIGNING_SECRET
+        sync: false
       # Render routes external traffic to this port and terminates TLS in front
       # of it, so binding to all interfaces here is expected.
       - key: QP_BACKEND_HOST
@@ -39,6 +42,20 @@ services:
       - key: QP_BACKEND_ALLOWED_ORIGINS
         sync: false
       # MUST be empty in production: a fixed signup code lets anyone verify any
-      # address. See "Verification codes are currently static" in the README.
+      # address. Production startup also refuses a non-empty value.
       - key: QP_VERIFICATION_STATIC_CODE
         value: ""
+      # Production signup requires actual delivery; the local outbox is not
+      # reachable by users and must never substitute for email verification.
+      - key: QP_MAIL_TRANSPORT
+        value: smtp
+      - key: QP_MAIL_FROM
+        sync: false
+      - key: QP_SMTP_HOST
+        sync: false
+      - key: QP_SMTP_PORT
+        value: "587"
+      - key: QP_SMTP_USER
+        sync: false
+      - key: QP_SMTP_PASS
+        sync: false

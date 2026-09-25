@@ -34,7 +34,14 @@ export function createApp() {
     // Streamable HTTP is handled by the MCP SDK/Express adapter because it
     // owns long-lived transport sessions and SSE responses. It still shares
     // this HTTP server, QP OAuth issuer, storage, and account boundary.
-    if (ideMcp.handles(ctx.pathname)) return ideMcp.handle(req, res);
+    if (ideMcp.handles(ctx.pathname)) {
+      try {
+        consumeRateLimit('ide-mcp', ctx.ip, config.rateLimit.global);
+      } catch (error) {
+        return handleError(ctx, error);
+      }
+      return ideMcp.handle(req, res);
+    }
     if (applyCors(req, res)) return;
 
     try {
@@ -104,6 +111,8 @@ function handleError(ctx, error) {
       ...(error.retryAfterSeconds ? { retryAfterSeconds: error.retryAfterSeconds } : {})
     }, headers);
   }
-  logger.error('Unhandled error', { requestId: ctx.requestId, path: ctx.pathname, error: error.message, stack: error.stack });
+  logger.error('Unhandled error', config.env === 'production'
+    ? { requestId: ctx.requestId, path: ctx.pathname, errorType: error?.name || 'Error' }
+    : { requestId: ctx.requestId, path: ctx.pathname, error: error.message, stack: error.stack });
   sendJson(ctx, 500, { ok: false, code: 'INTERNAL_ERROR', error: 'Something went wrong. Try again.' });
 }

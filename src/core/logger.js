@@ -6,17 +6,15 @@ const LEVELS = { debug: 10, info: 20, warn: 30, error: 40 };
 const activeLevel = LEVELS[config.logging.level] ?? LEVELS.info;
 
 // Field names whose values must never be logged.
-const REDACT_KEYS = new Set([
-  'password', 'confirmPassword', 'currentPassword', 'newPassword',
-  'token', 'accessToken', 'refreshToken', 'authorization', 'code', 'secret', 'pass'
-]);
+const REDACT_KEY = /(?:password|passphrase|token|authorization|cookie|secret|apikey|api_key|connectionstring|privatekey|codeverifier|clientsecret|leasehash|refreshtoken|verificationcode|^code$|^pass$)/i;
 
 function redact(value, depth = 0) {
-  if (depth > 4 || value === null || typeof value !== 'object') return value;
+  if (depth > 8) return '[TRUNCATED]';
+  if (value === null || typeof value !== 'object') return value;
   if (Array.isArray(value)) return value.map(item => redact(item, depth + 1));
   const clean = {};
   for (const [key, entry] of Object.entries(value)) {
-    clean[key] = REDACT_KEYS.has(key) ? '[REDACTED]' : redact(entry, depth + 1);
+    clean[key] = REDACT_KEY.test(key) ? '[REDACTED]' : redact(entry, depth + 1);
   }
   return clean;
 }

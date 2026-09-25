@@ -117,7 +117,7 @@ export const config = Object.freeze({
   }),
 
   password: Object.freeze({
-    minLength: 6,
+    minLength: process.env.NODE_ENV === 'production' ? 15 : 6,
     // Cap prevents scrypt DoS through multi-megabyte passwords.
     maxLength: 128,
     // scrypt parameters (OWASP-recommended interactive cost).
@@ -128,16 +128,9 @@ export const config = Object.freeze({
   }),
 
   verification: Object.freeze({
-    // TEMPORARY — development only.
-    //
-    // Gmail/SMTP delivery is switched off, so signup and resend hand out this
-    // fixed code instead of emailing a random one. To restore real delivery:
-    // set this to '' (or QP_VERIFICATION_STATIC_CODE='') and uncomment the two
-    // blocks marked "STATIC CODE" in src/modules/auth/auth-service.js.
-    //
-    // This MUST be empty in production: a fixed code means anyone who knows it
-    // can verify any address, which defeats email ownership entirely.
-    staticCode: process.env.QP_VERIFICATION_STATIC_CODE ?? '123456',
+    // A fixed code is supported only for local development. Production
+    // defaults to random emailed codes and refuses an explicitly fixed code.
+    staticCode: process.env.QP_VERIFICATION_STATIC_CODE ?? (process.env.NODE_ENV === 'production' ? '' : '123456'),
     codeLength: 6,
     ttlSeconds: intEnv('QP_VERIFICATION_TTL_SECONDS', 10 * 60),
     maxAttempts: 5,

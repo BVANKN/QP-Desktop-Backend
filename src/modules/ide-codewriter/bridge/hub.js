@@ -243,14 +243,17 @@ export class AgentHub {
       }
       if (url.pathname !== this.bridgePath) return;
 
-      // The Node `ws` client can set headers, so the desktop app uses
-      // Authorization. The query parameter is the fallback for environments
-      // where headers are not available on the WebSocket API.
+      // The desktop Node WebSocket client sends Authorization. Never accept
+      // bearer tokens in query strings: URLs are routinely retained in proxy
+      // and diagnostic logs, and browsers must not drive the desktop bridge.
       const header = req.headers.authorization;
       const bearer = typeof header === 'string' ? /^Bearer\s+(.+)$/i.exec(header.trim())?.[1] : null;
-      const token = bearer || url.searchParams.get('token');
-
-      const result = token ? await this.users.verifyAppToken(token) : null;
+      let result = null;
+      try {
+        result = bearer ? await this.users.verifyAppToken(bearer) : null;
+      } catch (error) {
+        log.error('Bridge authentication failed', error);
+      }
       if (!result) {
         log.warn('Rejected an unauthenticated bridge connection');
         socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');

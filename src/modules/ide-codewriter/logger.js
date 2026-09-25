@@ -29,7 +29,7 @@ function emit(level, scope, message, detail) {
 
 function safeInspect(value) {
   if (value instanceof Error) {
-    return `${value.name}: ${value.message}${value.stack ? '\n' + value.stack : ''}`;
+    return process.env.NODE_ENV === 'production' ? value.name : `${value.name}: ${value.message}${value.stack ? '\n' + value.stack : ''}`;
   }
   try {
     return JSON.stringify(value, replacer);
@@ -40,7 +40,7 @@ function safeInspect(value) {
 
 // Never let a secret reach the log, even accidentally.
 const SECRET_KEYS =
-  /^(password|secret|client_secret|token|access_token|refresh_token|authorization|code_verifier|appToken)$/i;
+  /(password|passphrase|secret|token|authorization|cookie|api_?key|connectionstring|privatekey|code_verifier|^code$|^pass$)/i;
 
 function replacer(key, value) {
   if (SECRET_KEYS.test(key) && typeof value === 'string') return 'redacted';

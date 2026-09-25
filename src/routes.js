@@ -141,6 +141,9 @@ export function buildRouter({ ideMcp } = {}) {
       throw new ValidationError('Passwords do not match.', { field: 'confirmPassword' });
     }
     const planId = body.planId === undefined ? undefined : planById(cleanString(body.planId, { field: 'Plan', maxLength: 20 })).id;
+    if (config.env === 'production' && planId && planId !== 'free') {
+      throw new ForbiddenError('Paid plans cannot be selected during signup.', 'PLAN_PAYMENT_REQUIRED');
+    }
     const result = await startSignup({ name, username, email, password, planId, ip: ctx.ip });
     sendJson(ctx, 200, { ok: true, ...result });
   });
@@ -226,6 +229,9 @@ export function buildRouter({ ideMcp } = {}) {
   // or receipt before switching the subscription. Until then it acts as the
   // mock checkout the product flow needs.
   router.post('/api/account/plan', authenticate, async ctx => {
+    if (config.env === 'production') {
+      throw new ForbiddenError('Plan changes require a verified payment or an administrator.', 'PLAN_PAYMENT_REQUIRED');
+    }
     const body = requireObject(await readJsonBody(ctx));
     const requested = cleanString(body.planId, { field: 'Plan', maxLength: 20 }).toLowerCase();
     if (!PLANS[requested]) throw new ValidationError('Unknown plan.', { field: 'planId' });

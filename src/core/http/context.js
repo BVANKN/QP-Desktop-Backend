@@ -1,6 +1,7 @@
 // Request context: safe body parsing with size limits, client IP resolution,
 // and JSON response helpers.
 import { randomUUID } from 'node:crypto';
+import { isIP } from 'node:net';
 import { PayloadTooLargeError, ValidationError } from '../errors.js';
 import { config } from '../../config/config.js';
 
@@ -35,7 +36,7 @@ export function createContext(req, res) {
 function resolveClientIp(req) {
   if (process.env.QP_BACKEND_TRUST_PROXY === '1') {
     const forwarded = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
-    if (forwarded) return forwarded;
+    if (isIP(forwarded)) return forwarded;
   }
   return req.socket.remoteAddress || 'unknown';
 }

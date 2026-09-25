@@ -130,6 +130,26 @@ test('IDE requires Premium and inherits the QP account identity', async () => {
   assert.equal(metadata.body.resource, boot.body.mcpUrl);
 });
 
+test('IDE MCP rejects foreign browser origins and desktop bridge tokens in URLs', async () => {
+  const denied = await fetch(`${server.baseUrl}/ide/mcp/example`, {
+    method: 'OPTIONS', headers: { Origin: 'https://attacker.example', 'Access-Control-Request-Method': 'POST' }
+  });
+  assert.equal(denied.status, 403);
+  assert.equal(denied.headers.get('access-control-allow-origin'), null);
+
+  const allowed = await fetch(`${server.baseUrl}/ide/mcp/example`, {
+    method: 'OPTIONS', headers: { Origin: 'http://localhost:5817', 'Access-Control-Request-Method': 'POST' }
+  });
+  assert.equal(allowed.status, 204);
+  assert.equal(allowed.headers.get('access-control-allow-origin'), 'http://localhost:5817');
+
+  const session = await register('ideurltoken', 'pro');
+  const bootstrap = await server.call('GET', '/api/ide/bootstrap', undefined, { accessToken: session.accessToken });
+  const socket = new WebSocket(`${bootstrap.body.bridgeUrl}?token=${encodeURIComponent(session.accessToken)}`);
+  const status = await new Promise(resolve => socket.once('unexpected-response', (_request, response) => resolve(response.statusCode)));
+  assert.equal(status, 401);
+});
+
 test('QP OAuth, bridge, workspace reads, and writes work end to end', async () => {
   const session = await register('ideagent', 'pro');
   const bootstrapResponse = await server.call('GET', '/api/ide/bootstrap', undefined, { accessToken: session.accessToken });

@@ -205,7 +205,8 @@ database.
 
 ## Configuration
 
-Every value has a safe default; override with environment variables.
+Development has convenient defaults. Production validates security-critical
+settings at startup and refuses to listen until they are configured.
 
 | Variable                                                 | Default                    | Purpose                                                                                                                |
 | -------------------------------------------------------- | -------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
@@ -220,14 +221,14 @@ Every value has a safe default; override with environment variables.
 | `QP_BACKEND_TRUST_PROXY`                                 | unset                      | Set to `1` only behind a trusted proxy                                                                                 |
 | `QP_ACCESS_TOKEN_TTL_SECONDS`                            | `900`                      | Access token lifetime                                                                                                  |
 | `QP_REFRESH_TOKEN_TTL_SECONDS`                           | `2592000`                  | Refresh token lifetime                                                                                                 |
-| `QP_VERIFICATION_STATIC_CODE`                            | `123456`                   | Fixed signup code; set to `''` to email a random one. **Must be empty in production.**                                 |
+| `QP_VERIFICATION_STATIC_CODE`                            | `123456` in development; empty in production | Fixed signup code for local tests only; production rejects a non-empty value.                      |
 | `QP_MAIL_TRANSPORT`                                      | `outbox`                   | `outbox` or `smtp`                                                                                                     |
 | `QP_MAIL_FROM`                                           | no-reply@…                 | Sender address                                                                                                         |
 | `QP_SMTP_HOST` / `_PORT` / `_USER` / `_PASS` / `_SECURE` | —                          | SMTP settings                                                                                                          |
 | `QP_LOG_LEVEL`                                           | `info`                     | `debug`, `info`, `warn`, `error`                                                                                       |
 | `QP_MCP_PUBLIC_BASE_URL`                                 | request origin             | Public HTTPS base used in generated MCP endpoints                                                                      |
 | `QP_MCP_MAX_PAYLOAD_BYTES`                               | `10485760`                 | Maximum desktop result/request payload                                                                                 |
-| `QP_MCP_DESKTOP_TIMEOUT_MS`                              | `105000`                   | Maximum wait for desktop execution; long metadata reads still use tool-specific limits                                 |
+| `QP_MCP_DESKTOP_TIMEOUT_MS`                              | `135000`                   | Maximum wait for desktop execution; long metadata reads still use tool-specific limits                                 |
 | `QP_MCP_OAUTH_AUTHORIZATION_TTL_SECONDS`                 | `1200`                     | Pending sign-in/consent lifetime; an expired temporary request is safely rebuilt                                       |
 | `QP_MCP_OAUTH_CODE_TTL_SECONDS`                          | `300`                      | One-time authorization-code lifetime                                                                                   |
 | `QP_MCP_OAUTH_ACCESS_TTL_SECONDS`                        | `900`                      | Resource-bound MCP access-token lifetime                                                                               |
@@ -240,14 +241,12 @@ Every value has a safe default; override with environment variables.
 | `QP_IDE_MCP_MAX_READ_BYTES`                              | `1048576`                  | Maximum combined text returned by a read call                                                                          |
 | `QP_IDE_MCP_MAX_FILE_BYTES`                              | `5242880`                  | Maximum individual text file size                                                                                      |
 
-### Verification codes are currently static
+### Local verification code
 
-**Email delivery of the signup code is switched off.** Signup and resend hand
-out a fixed code — `123456` — instead of mailing a random one. Everything
-around delivery is unchanged: the code is still HMAC'd into the pending record,
-still expires, is still attempt-limited, and resends still rotate it and reset
-the counter, so the throttling behaviour is already what it will be once real
-mail comes back.
+Development uses the fixed code `123456` unless overridden. Production always
+uses random emailed codes and refuses a fixed code. Set
+`QP_MAIL_TRANSPORT=smtp`, `QP_SMTP_HOST`, and a real `QP_MAIL_FROM` before
+deploying; an outbox file is not email delivery.
 
 To restore Gmail/SMTP delivery, clear the static code — nothing else needs
 editing, and the random code and `sendMail` calls come back on their own:
@@ -256,11 +255,7 @@ editing, and the random code and `sendMail` calls come back on their own:
 QP_VERIFICATION_STATIC_CODE='' npm start
 ```
 
-Or set `staticCode: ''` in `src/config/config.js` to make it permanent. The
-tests read the same switch, so they pass either way.
-
-> **This must be empty in production.** A fixed code means anyone who knows it
-> can verify any address, which defeats email ownership entirely.
+The tests read the same switch, so they pass either way.
 
 ### Local development mail
 
@@ -363,9 +358,20 @@ migration keys, and rerunning it does not duplicate records.
 
 Deliberate scope boundaries, and what to do before going live:
 
-- **Payments are not implemented.** `/api/account/plan` changes the plan
-  directly. Wire it to a payment provider's webhook or receipt verification
-  before charging money.
+- **Payments are not implemented.** Production refuses Pro selection at signup
+  and all self-service `/api/account/plan` changes until a verified payment or
+  administrator-controlled grant flow exists. The mock checkout remains in
+  development only. Do not launch paid self-service upgrade UI against this
+  endpoint expecting it to succeed.
+- **Production startup is fail-closed.** It requires durable storage, an HTTPS
+  public MCP origin, random email verification, and SMTP configuration.
+  On a managed host, filesystem mode additionally requires an explicit
+  `QP_BACKEND_PERSISTENT_VOLUME=1` after confirming the directory is a mounted
+  persistent disk; setting a directory name alone is not proof of persistence.
+  The documented sample account is never seeded in production. If it was
+  previously seeded into persistent storage with its documented password,
+  change that password or remove the account before deploying; startup
+  refuses to serve those known public credentials.
 - **Terminate TLS in front of this service.** It binds to loopback and speaks
   plain HTTP; run it behind a reverse proxy that handles certificates. Only set
   `QP_BACKEND_TRUST_PROXY=1` when a trusted proxy actually sets

@@ -5,10 +5,21 @@ import { config } from './src/config/config.js';
 import { logger } from './src/core/logger.js';
 import { closeMongo, initializeMongo, mongoEnabled } from './src/lib/mongo.js';
 import { initializeSigningKeys } from './src/lib/key-store.js';
-import { ensureSampleUser } from './src/modules/users/sample-user.js';
+import { ensureSampleUser, SAMPLE_USER } from './src/modules/users/sample-user.js';
+import { findUserByIdentifier } from './src/modules/users/user-repo.js';
+import { assertProductionReadiness } from './src/config/production-readiness.js';
+import { verifyPassword } from './src/lib/crypto.js';
+
+assertProductionReadiness();
 
 if (mongoEnabled()) await initializeMongo();
 await initializeSigningKeys();
+if (config.env === 'production') {
+  const sample = await findUserByIdentifier(SAMPLE_USER.email);
+  if (sample?.status === 'active' && sample.username === SAMPLE_USER.username && await verifyPassword(SAMPLE_USER.password, sample.passwordHash)) {
+    throw new Error('The publicly documented sample credentials are still active. Change that account password or remove the account before deploying.');
+  }
+}
 const sampleUser = await ensureSampleUser();
 if (sampleUser.created) logger.warn('Default sample account provisioned. Disable or replace it before exposing a production service.', { email: '123@gmail.com' });
 const server = createApp();

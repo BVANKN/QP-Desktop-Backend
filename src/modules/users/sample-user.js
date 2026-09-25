@@ -15,6 +15,7 @@ export const SAMPLE_USER = Object.freeze({
  * public deployment after onboarding.
  */
 export async function ensureSampleUser() {
+  if (process.env.NODE_ENV === 'production') return { created: false, disabled: true };
   if (String(process.env.QP_SEED_SAMPLE_USER || 'true').toLowerCase() === 'false') return { created: false, disabled: true };
   const existing = await findUserByIdentifier(SAMPLE_USER.email);
   if (existing) return { created: false, user: existing };

@@ -4,6 +4,7 @@
 import { config } from '../../config/config.js';
 
 export function applySecurityHeaders(res) {
+  if (config.env === 'production') res.setHeader('Strict-Transport-Security', 'max-age=31536000');
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('Referrer-Policy', 'no-referrer');

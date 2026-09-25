@@ -106,20 +106,23 @@ export function createIdeMcpSubsystem() {
   app.disable('x-powered-by');
   app.use((req, res, next) => {
     const origin = String(req.headers.origin || '');
-    if (origin) {
+    res.setHeader('Vary', 'Origin');
+    if (origin && config.allowedOrigins.includes(origin)) {
       res.setHeader('Access-Control-Allow-Origin', origin);
-      res.setHeader('Vary', 'Origin');
     }
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Mcp-Session-Id, MCP-Protocol-Version, Last-Event-ID');
     res.setHeader('Access-Control-Expose-Headers', 'Mcp-Session-Id, WWW-Authenticate');
-    if (req.method === 'OPTIONS') return res.status(204).end();
+    if (req.method === 'OPTIONS') return res.status(origin && config.allowedOrigins.includes(origin) ? 204 : 403).end();
     next();
   });
   app.use('/ide/mcp/:userId', mcpRouter);
   app.use((_req, res) => res.status(404).json({ error: 'Unknown Quicker Portal IDE endpoint.' }));
   app.use((error, _req, res, _next) => {
-    if (!res.headersSent) res.status(error?.status || 500).json({ error: error?.message || 'IDE MCP request failed.' });
+    if (!res.headersSent) {
+      const status = Number.isInteger(error?.status) && error.status >= 400 && error.status < 500 ? error.status : 500;
+      res.status(status).json({ error: status === 500 ? 'IDE MCP request failed.' : error?.message || 'Invalid IDE MCP request.' });
+    }
   });
 
   return {
